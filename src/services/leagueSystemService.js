@@ -420,6 +420,50 @@ export async function checkAndTransitionSeasons(fastify) {
       `UPDATE league_seasons SET status = 'offseason' WHERE id = $1`,
       [season.id]
     );
+
+    // --- Season 1 Wealth Tax & Legacy XP Transition ---
+    // Triggered when any league completes Season 1
+    if (season.season_number === 1) {
+      const check = await fastify.db.query(
+        "SELECT id FROM background_jobs WHERE job_type = 'season_1_wealth_tax' AND status = 'completed'"
+      );
+      
+      if (check.rows.length === 0) {
+        fastify.log.info('Season 1 ending detected. Initiating system-wide Wealth Tax transition...');
+        
+        // Record job start
+        const jobRes = await fastify.db.query(
+          "INSERT INTO background_jobs (job_type, status, started_at) VALUES ('season_1_wealth_tax', 'running', NOW()) RETURNING id"
+        );
+        const jobId = jobRes.rows[0].id;
+
+        try {
+          const { applySeasonWealthTax, normalizeSeasonIQ, archiveSeason1Stats } = await import('./rewardService.js');
+          
+          fastify.log.info('Archiving Season 1 stats for all users...');
+          await archiveSeason1Stats(fastify);
+
+          fastify.log.info('Applying Season 1 Wealth Tax...');
+          const taxResult = await applySeasonWealthTax(fastify);
+          
+          fastify.log.info('Normalizing IQ for elites...');
+          await normalizeSeasonIQ(fastify);
+
+          await fastify.db.query(
+            "UPDATE background_jobs SET status = 'completed', completed_at = NOW(), records_processed = $1 WHERE id = $2",
+            [taxResult.processedCount, jobId]
+          );
+          fastify.log.info('Season 1 Transition (Archive + Tax + IQ Reset) completed successfully.');
+        } catch (err) {
+          fastify.log.error({ err }, 'Season 1 Wealth Tax transition failed');
+          await fastify.db.query(
+            "UPDATE background_jobs SET status = 'failed', last_error = $1 WHERE id = $2",
+            [err.message, jobId]
+          );
+        }
+      }
+    }
+
     results.push({ seasonId: season.id, league: season.league_name, action: 'offseason' });
   }
 
