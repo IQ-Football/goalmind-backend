@@ -40,6 +40,8 @@ async function getRelayState(relayId, fastify) {
     tribeB_online: JSON.parse(data.tribeB_online || '[]'),
     tribeA_correct_total: parseInt(data.tribeA_correct_total || '0'),
     tribeB_correct_total: parseInt(data.tribeB_correct_total || '0'),
+    active_tribe: data.active_tribe || 'A',
+    active_player_index: parseInt(data.active_player_index || '0'),
     startTime: parseInt(data.startTime || '0'),
   };
 }
@@ -65,6 +67,8 @@ async function setRelayState(relayId, state, fastify) {
     tribeB_online: JSON.stringify(state.tribeB_online || []),
     tribeA_correct_total: String(state.tribeA_correct_total || 0),
     tribeB_correct_total: String(state.tribeB_correct_total || 0),
+    active_tribe: state.active_tribe || 'A',
+    active_player_index: String(state.active_player_index || 0),
     startTime: String(state.startTime || 0),
   });
   await fastify.redis.expire(relayKey(relayId), RELAY_STATE_TTL);
@@ -303,8 +307,8 @@ async function handleBatonPass(relayId, tribe, state, namespace, fastify) {
          winner = 'B';
        } else {
          // Tie-breaker: highest single IQ
-         const usersA = await fastify.db.query('SELECT MAX(elo) as max_elo FROM users WHERE id = ANY($1)', [currentState.tribeA_participants]);
-         const usersB = await fastify.db.query('SELECT MAX(elo) as max_elo FROM users WHERE id = ANY($1)', [currentState.tribeB_participants]);
+         const usersA = await fastify.db.query(`SELECT MAX(elo) as max_elo FROM users WHERE id IN (${currentState.tribeA_participants.map((_, i) => '$' + (i + 1)).join(',')})`, currentState.tribeA_participants);
+         const usersB = await fastify.db.query(`SELECT MAX(elo) as max_elo FROM users WHERE id IN (${currentState.tribeB_participants.map((_, i) => '$' + (i + 1)).join(',')})`, currentState.tribeB_participants);
          const maxA = usersA.rows[0]?.max_elo || 0;
          const maxB = usersB.rows[0]?.max_elo || 0;
          winner = maxA > maxB ? 'A' : (maxB > maxA ? 'B' : 'TIE');

@@ -77,12 +77,11 @@ const authRoutes = async (fastify, options) => {
       }
 
       // Determine cohort (first 500: Vanguard 500, next 500: Centurion)
-      const countRes = await fastify.db.query('SELECT COUNT(*) FROM users');
-      const totalUsers = parseInt(countRes.rows[0].count);
+      const usersTotalCount = await fastify.redis.incr('users:total_count');
       let cohort = null;
-      if (totalUsers < 500) {
+      if (usersTotalCount <= 500) {
         cohort = 'vanguard_500';
-      } else if (totalUsers < 1000) {
+      } else if (usersTotalCount <= 1000) {
         cohort = 'centurion';
       }
 
@@ -381,12 +380,11 @@ const authRoutes = async (fastify, options) => {
         const referralCodeNew = referralService.generateReferralCode(userId, tribeId);
 
         // Determine cohort (first 500: Vanguard 500, next 500: Centurion)
-        const countRes = await fastify.db.query('SELECT COUNT(*) FROM users');
-        const totalUsers = parseInt(countRes.rows[0].count);
+        const usersTotalCount = await fastify.redis.incr('users:total_count');
         let cohort = null;
-        if (totalUsers < 500) {
+        if (usersTotalCount <= 500) {
           cohort = 'vanguard_500';
-        } else if (totalUsers < 1000) {
+        } else if (usersTotalCount <= 1000) {
           cohort = 'centurion';
         }
 

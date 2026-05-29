@@ -30,9 +30,11 @@ export async function distributeSeasonalRewards(fastify, leagueId, seasonId) {
        const rewardGT = league.reward_goal_tokens || 0;
        const badgeName = league.reward_badge_name;
 
-       // Update GoalTokens (using metadata as specified)
+       // Update GoalTokens (using both column and metadata for backward compatibility)
        await client.query(
-         `UPDATE users SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{goal_tokens}', 
+         `UPDATE users SET 
+          goal_tokens = COALESCE(goal_tokens, 0) + $1,
+          metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{goal_tokens}', 
           to_jsonb(COALESCE((metadata->>'goal_tokens')::int, 0) + $1)) 
           WHERE id = $2`,
          [rewardGT, p.user_id]
@@ -139,8 +141,9 @@ export async function applySeasonWealthTax(fastify) {
     // Based on the spec, we should also check metadata if tokens were stored there by mistake, 
     // but the users table has a primary goal_tokens column now.
     
-    const usersRes = await client.query('SELECT id, goal_tokens, metadata FROM users');
+    const usersRes = await client.query('SELECT id, goal_tokens, metadata, username FROM users');
     let processedCount = 0;
+    let totalLostGT = 0;
 
     for (const user of usersRes.rows) {
       const currentGT = parseInt(user.goal_tokens || 0);
@@ -151,20 +154,22 @@ export async function applySeasonWealthTax(fastify) {
       if (newGT > 5000) newGT = 5000;
 
       const lostGT = currentGT - newGT;
+      totalLostGT += lostGT;
 
       // Update goal_tokens column and metadata (legacy_xp/arena_level)
       const metadata = user.metadata || {};
       const currentLegacyXP = parseInt(metadata.legacy_xp || 0);
       const newLegacyXP = currentLegacyXP + lostGT;
       
-      // Arena Level calculation: 1 level per 1000 Legacy XP (example logic)
+      // Arena Level calculation: 1 level per 1000 Legacy XP
       const arenaLevel = Math.floor(newLegacyXP / 1000) + 1;
 
       const updatedMetadata = {
         ...metadata,
         legacy_xp: newLegacyXP,
         arena_level: arenaLevel,
-        s1_final_gt: currentGT // Archive for history
+        s1_final_gt: currentGT,
+        wealth_tax_applied_at: new Date().toISOString()
       };
 
       await client.query(
@@ -173,11 +178,14 @@ export async function applySeasonWealthTax(fastify) {
       );
       
       processedCount++;
+      if (processedCount % 100 === 0) {
+        fastify.log.info({ processedCount }, 'Wealth Tax: Still processing users...');
+      }
     }
 
     await client.query('COMMIT');
-    fastify.log.info({ processedCount }, 'Season 1 Wealth Tax applied successfully');
-    return { success: true, processedCount };
+    fastify.log.info({ processedCount, totalLostGT }, 'Season 1 Wealth Tax applied successfully');
+    return { success: true, processedCount, totalLostGT };
   } catch (err) {
     await client.query('ROLLBACK');
     fastify.log.error({ err }, 'Error applying Season 1 Wealth Tax');

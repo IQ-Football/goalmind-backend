@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import config from '../config.js';
 import { calculateTribePoints, recordTribalBattle, areTribesRivals } from './tribeWarScoring.js';
 import { awardLeaguePoints } from './leagueSystemService.js';
+import { getNationPointsMultiplier } from './surgeService.js';
+
 
 // Battle state machine states
 export const BATTLE_STATES = {
@@ -829,6 +831,11 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
     p1NationPoints = 10;
     p2NationPoints = 10;
   }
+
+  // --- Surge Region Multiplier ---
+  // Double Nation Points for specific tribes (Nigeria, Ghana, Morocco, UCT, Wits)
+  p1NationPoints = Math.round(p1NationPoints * getNationPointsMultiplier(p1.tribe_slug));
+  p2NationPoints = Math.round(p2NationPoints * getNationPointsMultiplier(p2.tribe_slug));
 
   // Update battle in database
   await fastify.db.query(

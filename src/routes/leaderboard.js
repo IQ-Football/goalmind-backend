@@ -29,44 +29,69 @@ const leaderboardRoutes = async (fastify, options) => {
   fastify.get('/global', async (request, reply) => {
     const { limit = 100 } = request.query;
     const userId = request.user.id;
+    const cacheKey = `cache:leaderboard:global:${limit}`;
 
     try {
-      // Get top users from Redis
-      const topUsers = await fastify.redis.zrevrange(
-        'leaderboard:global',
-        0,
-        Math.min(limit - 1, 99),
-        'WITHSCORES'
-      );
+      let leaderboard;
+      let updatedAt;
 
-      // Parse Redis response (returns [userId, score, userId, score, ...])
-      const leaderboard = [];
-      for (let i = 0; i < topUsers.length; i += 2) {
-        const uid = topUsers[i];
-        const elo = parseInt(topUsers[i + 1]);
-
-        // Get user details from PostgreSQL
-        const userResult = await fastify.db.query(
-          `SELECT u.id, u.username, u.elo, t.name as tribe_name, t.slug as tribe_slug
-           FROM users u
-           LEFT JOIN tribes t ON u.tribe_id = t.id
-           WHERE u.id = $1`,
-          [uid]
+      // Try cache
+      const cached = await fastify.redis.get(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        leaderboard = parsed.leaderboard;
+        updatedAt = parsed.updatedAt;
+      } else {
+        // Get top users from Redis
+        const topUsers = await fastify.redis.zrevrange(
+          'leaderboard:global',
+          0,
+          Math.min(limit - 1, 99),
+          'WITHSCORES'
         );
 
-        if (userResult.rows.length > 0) {
-          leaderboard.push({
-            rank: leaderboard.length + 1,
-            userId: uid,
-            username: userResult.rows[0].username,
-            elo: elo || userResult.rows[0].elo,
-            tribe: userResult.rows[0].tribe_name,
-            tribeSlug: userResult.rows[0].tribe_slug,
-          });
+        // Parse Redis response (returns [userId, score, userId, score, ...])
+        const uids = [];
+        const scores = new Map();
+        for (let i = 0; i < topUsers.length; i += 2) {
+          uids.push(topUsers[i]);
+          scores.set(topUsers[i], parseInt(topUsers[i + 1]));
         }
+
+        leaderboard = [];
+        if (uids.length > 0) {
+          // Get user details from PostgreSQL in one query
+          const usersResult = await fastify.db.query(
+            `SELECT u.id, u.username, u.elo, t.name as tribe_name, t.slug as tribe_slug
+             FROM users u
+             LEFT JOIN tribes t ON u.tribe_id = t.id
+             WHERE u.id = ANY($1)`,
+            [uids]
+          );
+
+          // Map back to maintain Redis order
+          const userMap = new Map(usersResult.rows.map(u => [u.id, u]));
+          
+          for (const uid of uids) {
+            const user = userMap.get(uid);
+            if (user) {
+              leaderboard.push({
+                rank: leaderboard.length + 1,
+                userId: uid,
+                username: user.username,
+                elo: scores.get(uid) || user.elo,
+                tribe: user.tribe_name,
+                tribeSlug: user.tribe_slug,
+              });
+            }
+          }
+        }
+        updatedAt = new Date().toISOString();
+        // Cache for 30 seconds
+        await fastify.redis.set(cacheKey, JSON.stringify({ leaderboard, updatedAt }), 'EX', 30);
       }
 
-      // Get current user's rank
+      // Get current user's rank (always fresh)
       const userRank = await fastify.redis.zrevrank('leaderboard:global', userId);
       const userElo = await fastify.redis.zscore('leaderboard:global', userId);
 
@@ -82,7 +107,7 @@ const leaderboardRoutes = async (fastify, options) => {
             elo: parseInt(userElo) || 1000,
             percentile: userRank !== null ? ((totalUsers - userRank - 1) / totalUsers * 100).toFixed(1) : null,
           },
-          updatedAt: new Date().toISOString(),
+          updatedAt,
         },
         meta: {
           timestamp: new Date().toISOString(),
@@ -175,9 +200,19 @@ const leaderboardRoutes = async (fastify, options) => {
   // Tribe_Score = (Waitlist_Signups × 1.0) + (Avg_Fan_IQ × 0.5) + (Daily_Engagement × 0.3)
   fastify.get('/african-giants', async (request, reply) => {
     const { limit = 12 } = request.query;
+    const cacheKey = `cache:leaderboard:african-giants:${limit}`;
 
     try {
-      const leaderboard = await getAfricanPowerTable(fastify, Math.min(parseInt(limit), 12));
+      let leaderboard;
+      const cached = await fastify.redis.get(cacheKey);
+      
+      if (cached) {
+        leaderboard = JSON.parse(cached);
+      } else {
+        leaderboard = await getAfricanPowerTable(fastify, Math.min(parseInt(limit), 12));
+        // Cache for 60 seconds (African Giants moves slower than global)
+        await fastify.redis.set(cacheKey, JSON.stringify(leaderboard), 'EX', 60);
+      }
 
       return reply.send({
         success: true,

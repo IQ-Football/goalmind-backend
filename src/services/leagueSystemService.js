@@ -424,19 +424,23 @@ export async function checkAndTransitionSeasons(fastify) {
     // --- Season 1 Wealth Tax & Legacy XP Transition ---
     // Triggered when any league completes Season 1
     if (season.season_number === 1) {
-      const check = await fastify.db.query(
-        "SELECT id FROM background_jobs WHERE job_type = 'season_1_wealth_tax' AND status = 'completed'"
-      );
+      fastify.log.info('Season 1 ending detected. Attempting to initiate system-wide Wealth Tax transition...');
       
-      if (check.rows.length === 0) {
-        fastify.log.info('Season 1 ending detected. Initiating system-wide Wealth Tax transition...');
-        
-        // Record job start
-        const jobRes = await fastify.db.query(
-          "INSERT INTO background_jobs (job_type, status, started_at) VALUES ('season_1_wealth_tax', 'running', NOW()) RETURNING id"
-        );
+      // Use atomic operation to ensure only one process starts the job
+      // We only start if it hasn't completed yet and is not currently running
+      const jobRes = await fastify.db.query(`
+        INSERT INTO background_jobs (job_type, status, started_at)
+        VALUES ('season_1_wealth_tax', 'running', NOW())
+        ON CONFLICT (job_type) DO UPDATE
+        SET status = 'running', started_at = NOW(), last_error = NULL
+        WHERE background_jobs.status NOT IN ('running', 'completed')
+        RETURNING id
+      `);
+      
+      if (jobRes.rows.length > 0) {
         const jobId = jobRes.rows[0].id;
-
+        fastify.log.info({ jobId }, 'Initiating Season 1 transition...');
+        
         try {
           const { applySeasonWealthTax, normalizeSeasonIQ, archiveSeason1Stats } = await import('./rewardService.js');
           
@@ -461,6 +465,8 @@ export async function checkAndTransitionSeasons(fastify) {
             [err.message, jobId]
           );
         }
+      } else {
+        fastify.log.info('Season 1 transition already running or completed. Skipping.');
       }
     }
 
