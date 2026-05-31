@@ -201,30 +201,41 @@ export async function handleStripePaymentSuccess(fastify, sessionId) {
       [JSON.stringify(sessionId), reference]
     );
 
-    // Determine gems to award based on plan
+    // Determine rewards to award based on plan
     const gemsAwarded = getGemsForPlan(plan);
+    const goalTokensAwarded = getGoalTokensForPlan(plan);
 
-    // Update user gems and pro status
+    // Update user gems, goal_tokens and pro status
     const isProPlan = plan.includes('pro');
     const proDurationDays = plan.includes('annual') ? 365 : 30;
 
     await client.query(
       `UPDATE users SET
          gems = COALESCE(gems, 0) + $1,
-         is_pro = CASE WHEN $2 THEN true ELSE is_pro END,
-         pro_expires_at = CASE WHEN $2 THEN GREATEST(COALESCE(pro_expires_at, NOW()), NOW()) + INTERVAL '1 day' * $3 ELSE pro_expires_at END,
+         goal_tokens = COALESCE(goal_tokens, 0) + $2,
+         is_pro = CASE WHEN $3 THEN true ELSE is_pro END,
+         pro_expires_at = CASE WHEN $3 THEN GREATEST(COALESCE(pro_expires_at, NOW()), NOW()) + INTERVAL '1 day' * $4 ELSE pro_expires_at END,
          last_active_at = NOW()
-       WHERE id = $4`,
-      [gemsAwarded, isProPlan, proDurationDays, userId]
+       WHERE id = $5`,
+      [gemsAwarded, goalTokensAwarded, isProPlan, proDurationDays, userId]
     );
 
-    // Record gem transaction
+    // Record transaction
     const currencyCode = currency === 'GBP' ? 'GBP' : 'EUR';
-    await client.query(
-      `INSERT INTO gem_transactions (user_id, amount, currency, provider, reference, type, created_at)
-       VALUES ($1, $2, $3, 'stripe', $4, 'purchase', NOW())`,
-      [userId, gemsAwarded, currencyCode, reference]
-    );
+    if (gemsAwarded > 0) {
+      await client.query(
+        `INSERT INTO gem_transactions (user_id, amount, currency, provider, reference, type, created_at)
+         VALUES ($1, $2, $3, 'stripe', $4, 'purchase', NOW())`,
+        [userId, gemsAwarded, currencyCode, reference]
+      );
+    }
+    if (goalTokensAwarded > 0) {
+      await client.query(
+        `INSERT INTO gem_transactions (user_id, amount, currency, provider, reference, type, created_at)
+         VALUES ($1, $2, 'GOALTOKEN', 'stripe', $3, 'purchase', NOW())`,
+        [userId, goalTokensAwarded, reference]
+      );
+    }
 
     await client.query('COMMIT');
 
@@ -366,6 +377,15 @@ function getGemsForPlan(plan) {
   // Pro plans get 500 gems on annual, 200 on monthly
   if (plan.includes('pro_annual')) return 500;
   if (plan.includes('pro_monthly')) return 200;
+
+  return 0;
+}
+
+function getGoalTokensForPlan(plan) {
+  // Extract goal tokens from plan name (e.g., goal_tokens_impulse)
+  if (plan.includes('goal_tokens_impulse')) return 50;
+  if (plan.includes('goal_tokens_warrior')) return 250;
+  if (plan.includes('goal_tokens_tribe_leader')) return 1000;
 
   return 0;
 }

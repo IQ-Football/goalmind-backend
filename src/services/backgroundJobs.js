@@ -1,5 +1,6 @@
 import config from '../config.js';
 import { processWeeklyPromotionRelegation, checkAndTransitionSeasons } from './leagueSystemService.js';
+import { backfillSurgeBadges } from './achievementService.js';
 
 /**
  * Background Jobs Service
@@ -69,6 +70,15 @@ export function startBackgroundJobs(fastify) {
         });
     }
   }, SEASON_TRANSITION_CHECK_MS); // Reuse same interval since both are hourly
+
+  // ─── Backfill Surge Badges (run once at startup) ─────────────────
+  backfillSurgeBadges(fastify).then(result => {
+    if (result && result.awarded > 0) {
+      fastify.log.info({ ...result }, 'Backfill Surge Badges complete');
+    }
+  }).catch(err => {
+    fastify.log.error({ err }, 'Backfill Surge Badges failed');
+  });
 
   fastify.log.info('Background jobs started (WC2026 + League System)');
 }

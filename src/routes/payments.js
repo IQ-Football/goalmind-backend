@@ -7,6 +7,8 @@ import {
   verifyPaystackWebhookSignature,
   ZAR,
   EUROPE_PRICING,
+  REGIONAL_CONFIG,
+  GOAL_TOKEN_PACKS,
   initializePaymentByCurrency,
 } from '../services/paymentsService.js';
 import {
@@ -37,21 +39,32 @@ const paymentsRoutes = async (fastify, options) => {
       else currency = 'ZAR'; // Default for SA market
     }
 
+    const regional = REGIONAL_CONFIG[currency];
     const data = {
       currency,
-      locale: EUROPE_PRICING[currency]?.locale || ZAR.PRO_PRICE_ZAR,
+      locale: EUROPE_PRICING[currency]?.locale || (currency === 'ZAR' ? 'en-ZA' : 'en-US'),
     };
 
-    if (currency === 'ZAR') {
-      data.currencySymbol = 'R';
+    if (regional) {
+      data.currencySymbol = regional.symbol;
       data.pro = {
-        monthly: { planId: 'tier_pro_monthly', price: ZAR.PRO_PRICE_ZAR, label: ZAR.format(ZAR.PRO_PRICE_ZAR), interval: 'month' },
-        annual: { planId: 'tier_pro_annual', price: ZAR.PRO_PRICE_ZAR_ANNUAL, label: ZAR.format(ZAR.PRO_PRICE_ZAR_ANNUAL), interval: 'year' },
+        monthly: { planId: 'tier_pro_monthly', price: regional.pro.monthly.price, label: `${regional.symbol}${regional.pro.monthly.price}`, interval: 'month' },
+        annual: { planId: 'tier_pro_annual', price: regional.pro.annual.price, label: `${regional.symbol}${regional.pro.annual.price}`, interval: 'year' },
       };
-      data.gemPacks = Object.entries(ZAR.GEM_PACKS).map(([key, pack]) => ({
-        packId: key, gems: pack.gems, price: pack.priceZAR, label: pack.label,
+      data.goalTokenPacks = Object.entries(regional.packs).map(([key, pack]) => ({
+        packId: `goal_tokens_${key}`, 
+        goalTokens: GOAL_TOKEN_PACKS[key].goalTokens, 
+        price: pack.price, 
+        label: pack.label,
       }));
-    } else {
+      
+      // Legacy support for ZAR gems
+      if (currency === 'ZAR') {
+        data.gemPacks = Object.entries(ZAR.GEM_PACKS).map(([key, pack]) => ({
+          packId: key, gems: pack.gems, price: pack.priceZAR, label: pack.label,
+        }));
+      }
+    } else if (EUROPE_PRICING[currency]) {
       const eu = EUROPE_PRICING[currency];
       data.currencySymbol = eu.symbol;
       data.pro = {
@@ -89,6 +102,7 @@ const paymentsRoutes = async (fastify, options) => {
       `tribe_gems_100_gbp`, `tribe_gems_500_gbp`, `tribe_gems_1200_gbp`,
       `tribe_gems_100_eur`, `tribe_gems_500_eur`, `tribe_gems_1200_eur`,
       'tribe_transfer_gbp', 'tribe_transfer_eur',
+      'goal_tokens_impulse', 'goal_tokens_warrior', 'goal_tokens_tribe_leader',
     ];
 
     if (!planId || !validPlans.some(p => planId === p)) {
@@ -290,12 +304,12 @@ const paymentsRoutes = async (fastify, options) => {
 
     switch (event.event) {
       case 'charge.success': {
-        const { reference, amount, customer, metadata } = event.data;
+        const { reference, amount, customer, metadata, currency } = event.data;
         const { userId, plan } = metadata || {};
 
         if (userId && plan) {
-          await handleSuccessfulPayment(fastify, reference, userId, plan);
-          fastify.log.info({ reference, userId, plan }, 'Paystack webhook: payment success processed');
+          await handleSuccessfulPayment(fastify, reference, userId, plan, 'paystack', currency);
+          fastify.log.info({ reference, userId, plan, currency }, 'Paystack webhook: payment success processed');
         }
         break;
       }
@@ -404,8 +418,65 @@ const paymentsRoutes = async (fastify, options) => {
     }
   });
 
+  // ─── POST /payments/buy-tokens ───────────────────────────────────────────
+  // Real payment integration for GoalTokens
+  fastify.post('/buy-tokens', {
+    preHandler: [authenticate],
+    schema: {
+      body: {
+        type: 'object',
+        required: ['packId', 'currency'],
+        properties: {
+          packId: { type: 'string' },
+          currency: { type: 'string' },
+          callbackUrl: { type: 'string' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { packId, currency, callbackUrl } = request.body;
+    const userId = request.user.id;
+    const upperCurrency = currency.toUpperCase();
+    
+    const planId = `goal_tokens_${packId}`;
+    
+    if (!GOAL_TOKEN_PACKS[packId]) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'INVALID_PACK', message: 'Invalid pack ID', requestId: request.id },
+      });
+    }
+
+    const result = await initializePaymentByCurrency(fastify, {
+      userId,
+      planId,
+      currency: upperCurrency,
+      email: request.user.email,
+      callbackUrl,
+    });
+
+    if (!result.success) {
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'PAYMENT_INIT_FAILED', message: result.error, requestId: request.id },
+      });
+    }
+
+    const regional = REGIONAL_CONFIG[upperCurrency];
+
+    return reply.send({
+      success: true,
+      data: {
+        ...result.data,
+        currency: upperCurrency,
+        provider: regional?.provider || (['GBP', 'EUR'].includes(upperCurrency) ? 'stripe' : 'paystack'),
+      },
+      meta: { timestamp: new Date().toISOString(), requestId: request.id },
+    });
+  });
+
   // ─── POST /payments/tokens/purchase ──────────────────────────────────────
-  // Handle the token purchase logic
+  // Handle the token purchase logic (Simulated/IAP legacy path)
   fastify.post('/tokens/purchase', {
     preHandler: [authenticate],
     schema: {
@@ -421,12 +492,6 @@ const paymentsRoutes = async (fastify, options) => {
     const userId = request.user.id;
     const { packId } = request.body;
 
-    const GOAL_TOKEN_PACKS = {
-      'impulse': { goalTokens: 50, price: 0.99 },
-      'warrior': { goalTokens: 250, price: 3.99 },
-      'tribe_leader': { goalTokens: 1000, price: 9.99 },
-    };
-
     const pack = GOAL_TOKEN_PACKS[packId];
     if (!pack) {
       return reply.status(400).send({
@@ -435,22 +500,19 @@ const paymentsRoutes = async (fastify, options) => {
       });
     }
 
-    // In a real implementation, we would verify the IAP or Stripe payment here.
-    // For now, we'll simulate a successful purchase.
-    
     const client = await fastify.db.connect();
     try {
       await client.query('BEGIN');
       
       await client.query(
-        'UPDATE users SET gems = COALESCE(gems, 0) + $1, battle_tokens = 6, last_token_refill_at = NOW() WHERE id = $2',
+        'UPDATE users SET goal_tokens = COALESCE(goal_tokens, 0) + $1, last_active_at = NOW() WHERE id = $2',
         [pack.goalTokens, userId]
       );
 
       const reference = `TOKEN_PURCHASE_${Date.now()}_${userId.slice(0, 8)}`;
       await client.query(
-        `INSERT INTO gem_transactions (user_id, amount, provider, reference, type, created_at)
-         VALUES ($1, $2, 'iap', $3, 'purchase', NOW())`,
+        `INSERT INTO gem_transactions (user_id, amount, currency, provider, reference, type, created_at)
+         VALUES ($1, $2, 'GOALTOKEN', 'iap', $3, 'purchase', NOW())`,
         [userId, pack.goalTokens, reference]
       );
 

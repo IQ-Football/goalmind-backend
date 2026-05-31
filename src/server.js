@@ -135,6 +135,12 @@ startMatchmakingPolling(fastify, matchmakingNamespace);
 // Namespace for Relay
 const relayNamespace = io.of('/relay');
 setupRelayHandlers(relayNamespace, fastify);
+fastify.decorate('relayNamespace', relayNamespace);
+
+// Namespace for Tournament Leaderboard
+const tournamentNamespace = io.of('/tournament');
+setupTournamentHandlers(tournamentNamespace, fastify);
+fastify.decorate('tournamentNamespace', tournamentNamespace);
 
 // Namespace for Tournament
 const tournamentNamespace = io.of('/tournament');
