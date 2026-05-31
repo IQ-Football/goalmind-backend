@@ -31,6 +31,7 @@ import prestigeRoutes from './routes/prestige.js';
 import relayRoutes from './routes/relay.js';
 import { setupBattleHandlers } from './services/battleService.js';
 import { setupRelayHandlers } from './services/relayService.js';
+import { setupTournamentHandlers } from './services/tournamentLeaderboardService.js';
 import { setupMatchmakingHandlers, startMatchmakingPolling } from './services/matchmakingService.js';
 import { startBackgroundJobs } from './services/backgroundJobs.js';
 
@@ -134,6 +135,12 @@ startMatchmakingPolling(fastify, matchmakingNamespace);
 // Namespace for Relay
 const relayNamespace = io.of('/relay');
 setupRelayHandlers(relayNamespace, fastify);
+fastify.decorate('relayNamespace', relayNamespace);
+
+// Namespace for Tournament Leaderboard
+const tournamentNamespace = io.of('/tournament');
+setupTournamentHandlers(tournamentNamespace, fastify);
+fastify.decorate('tournamentNamespace', tournamentNamespace);
 
 fastify.log.info('Socket.IO servers initialized');
 

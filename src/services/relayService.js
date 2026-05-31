@@ -393,6 +393,17 @@ export async function createRelayMatch(fastify, tribeA_id, tribeB_id) {
     startTime: Date.now(),
   };
   await setRelayState(relayId, state, fastify);
+
+  // P0: Sync initial match state to PostgreSQL for leaderboard tracking
+  try {
+    await fastify.db.query(
+      'INSERT INTO relay_matches (id, tribe_a_id, tribe_b_id, status) VALUES ($1, $2, $3, $4)',
+      [relayId, tribeA_id, tribeB_id, RELAY_STATES.LOBBY]
+    );
+  } catch (err) {
+    fastify.log.error({ err, relayId }, 'Error persisting relay match to DB');
+  }
+
   return relayId;
 }
 
@@ -423,6 +434,11 @@ export async function startRelayMatch(relayId, fastify, namespace) {
   await updateRelayField(relayId, 'tribeB_participants', finalParticipantsB, fastify);
   await updateRelayField(relayId, 'status', RELAY_STATES.OPENING, fastify);
   
+  // Sync status to DB
+  fastify.db.query('UPDATE relay_matches SET status = $1 WHERE id = $2', [RELAY_STATES.OPENING, relayId]).catch(err => {
+    fastify.log.error({ err, relayId }, 'Error updating relay status in DB');
+  });
+  
   namespace.to(`relay:${relayId}`).emit('relay:opening', { 
     relayId,
     tribeA_participants: finalParticipantsA,
@@ -431,6 +447,12 @@ export async function startRelayMatch(relayId, fastify, namespace) {
 
   setTimeout(async () => {
     await updateRelayField(relayId, 'status', RELAY_STATES.SEQUENCE, fastify);
+    
+    // Sync status to DB
+    fastify.db.query('UPDATE relay_matches SET status = $1 WHERE id = $2', [RELAY_STATES.SEQUENCE, relayId]).catch(err => {
+      fastify.log.error({ err, relayId }, 'Error updating relay status in DB');
+    });
+
     namespace.to(`relay:${relayId}`).emit('relay:start', { relayId });
   }, 10000);
 }

@@ -1,5 +1,5 @@
 import { authenticate, checkAdmin } from '../middleware/auth.js';
-import { awardBadge, awardBadgeWithTribeCap, awardFoundingGeneral, FOUNDING_GENERAL_ID, FOUNDING_CAPTAIN_ID, FOUNDING_THRESHOLD } from '../services/achievementService.js';
+import { awardBadge, awardBadgeWithTribeCap, awardFoundingGeneral, awardFoundingCenturion, FOUNDING_GENERAL_ID, FOUNDING_CAPTAIN_ID, FOUNDING_CENTURION_ID, FOUNDING_THRESHOLD } from '../services/achievementService.js';
 
 const achievementRoutes = async (fastify, options) => {
   // GET /achievements - User's earned badges (requires auth)
@@ -127,6 +127,8 @@ const achievementRoutes = async (fastify, options) => {
       let result = { success: false };
       if (achievementId === FOUNDING_GENERAL_ID) {
         result = await awardFoundingGeneral(fastify, userId, force);
+      } else if (achievementId === FOUNDING_CENTURION_ID) {
+        result = await awardFoundingCenturion(fastify, userId, force);
       } else {
         await fastify.db.query(
           `INSERT INTO user_achievements (user_id, achievement_id, earned_at)
@@ -139,7 +141,7 @@ const achievementRoutes = async (fastify, options) => {
 
       if (!result.success) {
         const message = result.reason === 'cap_reached' 
-          ? 'Tribe cap reached for Founding General badge. Use force: true to override.'
+          ? `Tribe cap reached for this badge (${result.count}). Use force: true to override.`
           : 'Failed to award badge.';
         return reply.status(400).send({
           success: false,

@@ -4,6 +4,7 @@ import config from '../config.js';
 import otpService from '../services/otpService.js';
 import referralService from '../services/referralService.js';
 import { processTribalCatchup } from '../services/tribeIdentityService.js';
+import { trigger25kMilestone } from '../services/milestoneService.js';
 
 const authRoutes = async (fastify, options) => {
   // POST /auth/register - Create account with tribe selection
@@ -78,6 +79,7 @@ const authRoutes = async (fastify, options) => {
 
       // Determine cohort (first 500: Vanguard 500, next 500: Centurion)
       const usersTotalCount = await fastify.redis.incr('users:total_count');
+
       let cohort = null;
       if (usersTotalCount <= 500) {
         cohort = 'vanguard_500';
@@ -85,24 +87,43 @@ const authRoutes = async (fastify, options) => {
         cohort = 'centurion';
       }
 
-      const userResult = await fastify.db.query(
-        `INSERT INTO users (id, username, email, password_hash, tribe_id, referred_by, referral_code, cohort) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-         RETURNING id, username, email, tribe_id, elo, battles_played, battles_won, created_at, cohort`,
-        [userId, username, email, passwordHash, tribeId, referredBy, referralCodeNew, cohort]
-      );
+      // START TRANSACTION
+      const client = await fastify.db.connect();
+      let userResult;
+      try {
+        await client.query('BEGIN');
 
-      // Add user to tribe_members
-      await fastify.db.query(
-        `INSERT INTO tribe_members (user_id, tribe_id) VALUES ($1, $2)`,
-        [userId, tribeId]
-      );
+        userResult = await client.query(
+          `INSERT INTO users (id, username, email, password_hash, tribe_id, referred_by, referral_code, cohort)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING id, username, email, tribe_id, elo, battles_played, battles_won, created_at, cohort`,
+          [userId, username, email, passwordHash, tribeId, referredBy, referralCodeNew, cohort]
+        );
 
-      // Update tribe member count
-      await fastify.db.query(
-        `UPDATE tribes SET member_count = member_count + 1 WHERE id = $1`,
-        [tribeId]
-      );
+        // Add user to tribe_members
+        await client.query(
+          `INSERT INTO tribe_members (user_id, tribe_id) VALUES ($1, $2)`,
+          [userId, tribeId]
+        );
+
+        // Update tribe member count
+        await client.query(
+          `UPDATE tribes SET member_count = member_count + 1 WHERE id = $1`,
+          [tribeId]
+        );
+
+        await client.query('COMMIT');
+      } catch (transactionErr) {
+        await client.query('ROLLBACK');
+        throw transactionErr;
+      } finally {
+        client.release();
+      }
+
+      // Trigger 25k milestone if applicable (AFTER successful registration)
+      if (usersTotalCount === 25000) {
+        trigger25kMilestone(fastify, userId).catch(err => fastify.log.error(err, '25k Milestone trigger failed'));
+      }
 
       // Tribal Catch-Up & Bounty Logic
       await processTribalCatchup(fastify, { userId, tribeId });
@@ -381,6 +402,7 @@ const authRoutes = async (fastify, options) => {
 
         // Determine cohort (first 500: Vanguard 500, next 500: Centurion)
         const usersTotalCount = await fastify.redis.incr('users:total_count');
+
         let cohort = null;
         if (usersTotalCount <= 500) {
           cohort = 'vanguard_500';
@@ -388,25 +410,43 @@ const authRoutes = async (fastify, options) => {
           cohort = 'centurion';
         }
 
-        const newUserResult = await fastify.db.query(
-          `INSERT INTO users (id, username, phone_number, tribe_id, referred_by, referral_code, cohort) 
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-           RETURNING id, username, phone_number, tribe_id, elo, battles_played, battles_won, created_at, cohort`,
-          [userId, username, phoneNumber, tribeId, referredBy, referralCodeNew, cohort]
-        );
-        user = newUserResult.rows[0];
+        // START TRANSACTION
+        const client = await fastify.db.connect();
+        try {
+          await client.query('BEGIN');
 
-        // Add user to tribe_members
-        await fastify.db.query(
-          `INSERT INTO tribe_members (user_id, tribe_id) VALUES ($1, $2)`,
-          [userId, tribeId]
-        );
+          const newUserResult = await client.query(
+            `INSERT INTO users (id, username, phone_number, tribe_id, referred_by, referral_code, cohort)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING id, username, phone_number, tribe_id, elo, battles_played, battles_won, created_at, cohort`,
+            [userId, username, phoneNumber, tribeId, referredBy, referralCodeNew, cohort]
+          );
+          user = newUserResult.rows[0];
 
-        // Update tribe member count
-        await fastify.db.query(
-          `UPDATE tribes SET member_count = member_count + 1 WHERE id = $1`,
-          [tribeId]
-        );
+          // Add user to tribe_members
+          await client.query(
+            `INSERT INTO tribe_members (user_id, tribe_id) VALUES ($1, $2)`,
+            [userId, tribeId]
+          );
+
+          // Update tribe member count
+          await client.query(
+            `UPDATE tribes SET member_count = member_count + 1 WHERE id = $1`,
+            [tribeId]
+          );
+
+          await client.query('COMMIT');
+        } catch (transactionErr) {
+          await client.query('ROLLBACK');
+          throw transactionErr;
+        } finally {
+          client.release();
+        }
+
+        // Trigger 25k milestone if applicable (AFTER successful registration)
+        if (usersTotalCount === 25000) {
+          trigger25kMilestone(fastify, userId).catch(err => fastify.log.error(err, '25k Milestone trigger failed'));
+        }
 
         // Tribal Catch-Up & Bounty Logic
         await processTribalCatchup(fastify, { userId, tribeId });

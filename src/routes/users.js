@@ -14,7 +14,7 @@ const userRoutes = async (fastify, options) => {
       const result = await fastify.db.query(
         `SELECT u.id, u.username, u.email, u.tribe_id, u.elo, u.battles_played, 
                 u.battles_won, u.last_active_at, u.created_at,
-                u.is_pro, u.gems, u.pro_expires_at, u.battle_tokens, u.last_token_refill_at,
+                u.is_pro, u.goal_tokens, u.gems, u.pro_expires_at, u.battle_tokens, u.last_token_refill_at,
                 t.name as tribe_name, t.slug as tribe_slug, t.type as tribe_type,
                 t.primary_color, t.secondary_color,
                 tm.tier, tm.contribution_points
@@ -94,7 +94,7 @@ const userRoutes = async (fastify, options) => {
 
     try {
       const result = await fastify.db.query(
-        'SELECT gems, battle_tokens, is_pro FROM users WHERE id = $1',
+        'SELECT goal_tokens, gems, battle_tokens, is_pro FROM users WHERE id = $1',
         [userId]
       );
 
@@ -108,7 +108,8 @@ const userRoutes = async (fastify, options) => {
       return reply.send({
         success: true,
         data: {
-          goalTokens: result.rows[0].gems,
+          goalTokens: result.rows[0].goal_tokens,
+          gems: result.rows[0].gems,
           battleTokens: result.rows[0].battle_tokens,
           isPro: result.rows[0].is_pro,
         },
