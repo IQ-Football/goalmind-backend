@@ -1,5 +1,6 @@
 import { authenticate } from '../middleware/auth.js';
 import { getAfricanPowerTable, SUPER_TRIBE_SLUGS } from '../services/africanGiantsService.js';
+import { getTournamentLeaderboard } from '../services/tournamentLeaderboardService.js';
 
 // African Giants "Super-Tribes" — mirrors AFRICAN_GIANTS_SPECS.md from Product Strategist
 const AFRICAN_CLUB_SLUGS = SUPER_TRIBE_SLUGS;
@@ -190,6 +191,34 @@ const leaderboardRoutes = async (fastify, options) => {
         error: {
           code: 'INTERNAL_ERROR',
           message: 'Failed to fetch tribal leaderboard',
+          requestId: request.id,
+        },
+      });
+    }
+  });
+
+  // GET /leaderboard/tournament - Tribe Relay Tournament real-time rankings
+  fastify.get('/tournament', async (request, reply) => {
+    try {
+      const leaderboard = await getTournamentLeaderboard(fastify);
+      return reply.send({
+        success: true,
+        data: {
+          leaderboard,
+          updatedAt: new Date().toISOString(),
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+          requestId: request.id,
+        },
+      });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Failed to fetch tournament leaderboard',
           requestId: request.id,
         },
       });

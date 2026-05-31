@@ -1,4 +1,4 @@
-import { hasAchievement, FOUNDING_CAPTAIN_ID } from './achievementService.js';
+import { hasAchievement, awardFoundingGeneral, awardFoundingCenturion, FOUNDING_CAPTAIN_ID, FOUNDING_GENERAL_ID, FOUNDING_CENTURION_ID } from './achievementService.js';
 
 /**
  * Fetch tribal visual configuration.
@@ -127,28 +127,14 @@ export async function processTribalCatchup(fastify, { userId, tribeId }) {
 
     // 1.5 Founding General Logic (for the first 10)
     if (tribeInfo.member_count <= 10) {
-      const signupNumber = tribeInfo.member_count;
-      const badgeData = {
-        asset: '/home/team/shared/GoalMind/assets/badges/founding_general.png',
-        signup_number: signupNumber,
-        flair_name: 'Ancient Scroll'
-      };
+      await awardFoundingGeneral(fastify, userId);
+      fastify.log.info({ userId, tribeId }, 'Founding General awarded automatically during catchup');
+    }
 
-      await fastify.db.query(
-        `UPDATE tribe_members 
-         SET is_founding_general = true,
-             metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{badges,founding_general}', $1::jsonb)
-         WHERE user_id = $2`,
-        [JSON.stringify(badgeData), userId]
-      );
-
-      // Also sync to users metadata for profile display
-      await fastify.db.query(
-        `UPDATE users 
-         SET metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{badges,founding_general}', $1::jsonb)
-         WHERE id = $2`,
-        [JSON.stringify(badgeData), userId]
-      );
+    // 1.55 Founding Centurion Logic (for members 11-100)
+    if (tribeInfo.member_count > 10 && tribeInfo.member_count <= 100) {
+      await awardFoundingCenturion(fastify, userId);
+      fastify.log.info({ userId, tribeId }, 'Founding Centurion awarded automatically during catchup');
     }
 
     // 2. Vanguard 100 Logic (Multiplier flag and Power Point Airdrop)

@@ -10,7 +10,7 @@ const pool = new pg.Pool({
 });
 
 async function run() {
-  const res = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'");
+  const res = await pool.query("SELECT * FROM badges WHERE name LIKE '%25k%' OR name LIKE '%Surge%'");
   console.log(res.rows);
   await pool.end();
 }

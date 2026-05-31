@@ -121,8 +121,22 @@ async function run() {
       } else {
         await syncTribe(tribeRes.rows[0].id, tribeRes.rows[0].name);
       }
+    } else if (mode === '--surge') {
+      const SURGE_TRIBE_SLUGS = [
+        'nigeria',
+        'ghana',
+        'morocco',
+        'uct-ikey-tigers',
+        'wits-clever-boys'
+      ];
+      for (const slug of SURGE_TRIBE_SLUGS) {
+        const tribeRes = await pool.query('SELECT id, name FROM tribes WHERE slug = $1', [slug]);
+        if (tribeRes.rows.length > 0) {
+          await syncTribe(tribeRes.rows[0].id, tribeRes.rows[0].name);
+        }
+      }
     } else if (mode === '--all') {
-      const tribes = await pool.query('SELECT id, name FROM tribes WHERE is_super_tribe = true');
+      const tribes = await pool.query('SELECT id, name FROM tribes');
       for (const tribe of tribes.rows) {
         await syncTribe(tribe.id, tribe.name);
       }
@@ -132,6 +146,7 @@ async function run() {
       console.log('  node manual_award_founding_general.mjs --user <userId> [--force]');
       console.log('  node manual_award_founding_general.mjs --captain <email_or_userId>');
       console.log('  node manual_award_founding_general.mjs --tribe <tribe_id_or_slug>');
+      console.log('  node manual_award_founding_general.mjs --surge');
       console.log('  node manual_award_founding_general.mjs --all');
     }
   } catch (err) {

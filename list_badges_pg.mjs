@@ -10,8 +10,8 @@ const pool = new pg.Pool({
 });
 
 async function run() {
-  const res = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'");
-  console.log(res.rows);
+  const res = await pool.query("SELECT * FROM badges");
+  console.log(JSON.stringify(res.rows, null, 2));
   await pool.end();
 }
 run().catch(console.error);

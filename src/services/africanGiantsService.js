@@ -13,7 +13,7 @@
  * - Daily engagement streak tracking
  */
 
-import { awardBadge, awardBadgeWithTribeCap, FOUNDING_GENERAL_ID, FOUNDING_THRESHOLD } from './achievementService.js';
+import { awardBadge, awardBadgeWithTribeCap, FOUNDING_GENERAL_ID, FOUNDING_THRESHOLD, checkAndAward25kSurgeBadge } from './achievementService.js';
 
 // Scoring weights
 const WEIGHT_WAITLIST = 1.0;
@@ -518,6 +518,9 @@ export async function registerWaitlistSignup(fastify, { email, tribeSlug, userna
       [username || email.split('@')[0], email, passwordHash, tribe.id, cohort]
     );
     const user = userResult.rows[0];
+
+    // Award 25k Surge badge if applicable
+    await checkAndAward25kSurgeBadge(fastify, user.id);
 
     // Credit tribe waitlist score
     const newCount = await recordWaitlistSignup(fastify, tribe.id);

@@ -60,7 +60,7 @@ const authRoutes = async (fastify, options) => {
       }
 
       // Hash password and create user
-      const passwordHash = await bcrypt.hash(password, 12);
+      const passwordHash = await bcrypt.hash(password, 10);
       const userId = uuidv4();
       const referralCodeNew = referralService.generateReferralCode(userId, tribeId);
 
@@ -85,27 +85,45 @@ const authRoutes = async (fastify, options) => {
         cohort = 'centurion';
       }
 
-      const userResult = await fastify.db.query(
-        `INSERT INTO users (id, username, email, password_hash, tribe_id, referred_by, referral_code, cohort) 
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-         RETURNING id, username, email, tribe_id, elo, battles_played, battles_won, created_at, cohort`,
-        [userId, username, email, passwordHash, tribeId, referredBy, referralCodeNew, cohort]
-      );
+      // Execute database operations in a transaction for consistency
+      const client = await fastify.db.connect();
+      let userResult;
+      try {
+        await client.query('BEGIN');
+        
+        userResult = await client.query(
+          `INSERT INTO users (id, username, email, password_hash, tribe_id, referred_by, referral_code, cohort) 
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+           RETURNING id, username, email, tribe_id, elo, battles_played, battles_won, created_at, cohort`,
+          [userId, username, email, passwordHash, tribeId, referredBy, referralCodeNew, cohort]
+        );
 
-      // Add user to tribe_members
-      await fastify.db.query(
-        `INSERT INTO tribe_members (user_id, tribe_id) VALUES ($1, $2)`,
-        [userId, tribeId]
-      );
+        // Add user to tribe_members
+        await client.query(
+          `INSERT INTO tribe_members (user_id, tribe_id) VALUES ($1, $2)`,
+          [userId, tribeId]
+        );
 
-      // Update tribe member count
-      await fastify.db.query(
-        `UPDATE tribes SET member_count = member_count + 1 WHERE id = $1`,
-        [tribeId]
-      );
+        // Update tribe member count
+        await client.query(
+          `UPDATE tribes SET member_count = member_count + 1 WHERE id = $1`,
+          [tribeId]
+        );
 
-      // Tribal Catch-Up & Bounty Logic
-      await processTribalCatchup(fastify, { userId, tribeId });
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw err;
+      } finally {
+        client.release();
+      }
+
+      // Tribal Catch-Up & Bounty Logic - Fire and forget to optimize registration response time
+      setImmediate(() => {
+        processTribalCatchup(fastify, { userId, tribeId }).catch(err => {
+          fastify.log.error({ err, userId, tribeId }, 'Async Tribal Catchup failed');
+        });
+      });
 
       // Record referral attribution if applicable
       if (referredBy) {
@@ -388,28 +406,45 @@ const authRoutes = async (fastify, options) => {
           cohort = 'centurion';
         }
 
-        const newUserResult = await fastify.db.query(
-          `INSERT INTO users (id, username, phone_number, tribe_id, referred_by, referral_code, cohort) 
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
-           RETURNING id, username, phone_number, tribe_id, elo, battles_played, battles_won, created_at, cohort`,
-          [userId, username, phoneNumber, tribeId, referredBy, referralCodeNew, cohort]
-        );
-        user = newUserResult.rows[0];
+        // Execute database operations in a transaction for consistency
+        const client = await fastify.db.connect();
+        try {
+          await client.query('BEGIN');
+          
+          const newUserResult = await client.query(
+            `INSERT INTO users (id, username, phone_number, tribe_id, referred_by, referral_code, cohort)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id, username, phone_number, tribe_id, elo, battles_played, battles_won, created_at, cohort`,
+            [userId, username, phoneNumber, tribeId, referredBy, referralCodeNew, cohort]
+          );
+          user = newUserResult.rows[0];
 
-        // Add user to tribe_members
-        await fastify.db.query(
-          `INSERT INTO tribe_members (user_id, tribe_id) VALUES ($1, $2)`,
-          [userId, tribeId]
-        );
+          // Add user to tribe_members
+          await client.query(
+            `INSERT INTO tribe_members (user_id, tribe_id) VALUES ($1, $2)`,
+            [userId, tribeId]
+          );
 
-        // Update tribe member count
-        await fastify.db.query(
-          `UPDATE tribes SET member_count = member_count + 1 WHERE id = $1`,
-          [tribeId]
-        );
+          // Update tribe member count
+          await client.query(
+            `UPDATE tribes SET member_count = member_count + 1 WHERE id = $1`,
+            [tribeId]
+          );
 
-        // Tribal Catch-Up & Bounty Logic
-        await processTribalCatchup(fastify, { userId, tribeId });
+          await client.query('COMMIT');
+        } catch (err) {
+          await client.query('ROLLBACK');
+          throw err;
+        } finally {
+          client.release();
+        }
+
+        // Tribal Catch-Up & Bounty Logic - Fire and forget to optimize registration response time
+        setImmediate(() => {
+          processTribalCatchup(fastify, { userId, tribeId }).catch(err => {
+            fastify.log.error({ err, userId, tribeId }, 'Async Tribal Catchup failed');
+          });
+        });
 
         // Record referral attribution if applicable
         if (referredBy) {

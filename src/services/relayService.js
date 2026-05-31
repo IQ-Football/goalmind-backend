@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { finalizeRelayTournament } from './rewardService.js';
+import { broadcastTournamentUpdate } from './tournamentLeaderboardService.js';
 
 export const RELAY_STATES = {
   LOBBY: 'lobby',
@@ -315,6 +316,20 @@ async function handleBatonPass(relayId, tribe, state, namespace, fastify) {
        }
 
        await updateRelayField(relayId, 'status', RELAY_STATES.COMPLETED, fastify);
+
+       const winnerTribeId = winner === 'A' ? currentState.tribeA_id : (winner === 'B' ? currentState.tribeB_id : null);
+
+       // Save relay match to PostgreSQL
+       try {
+         await fastify.db.query(
+           `INSERT INTO relay_matches (tribe_a_id, tribe_b_id, tribe_a_score, tribe_b_score, winner_tribe_id)
+            VALUES ($1, $2, $3, $4, $5)`,
+           [currentState.tribeA_id, currentState.tribeB_id, currentState.tribeA_score, currentState.tribeB_score, winnerTribeId]
+         );
+       } catch (err) {
+         fastify.log.error('Error saving relay match to DB:', err);
+       }
+
        namespace.to(`relay:${relayId}`).emit('relay:end', {
          winner,
          tribeA_score: currentState.tribeA_score,
@@ -322,13 +337,22 @@ async function handleBatonPass(relayId, tribe, state, namespace, fastify) {
        });
 
        // Finalize rewards and Hall of Generals induction
-       const winnerTribeId = winner === 'A' ? currentState.tribeA_id : (winner === 'B' ? currentState.tribeB_id : null);
        const winnerParticipants = winner === 'A' ? currentState.tribeA_participants : (winner === 'B' ? currentState.tribeB_participants : []);
-       
+
        if (winnerTribeId) {
          await finalizeRelayTournament(fastify, relayId, winnerTribeId, winnerParticipants);
+
+         // Broadcast tournament update
+         broadcastTournamentUpdate(fastify, {
+           type: 'relay_end',
+           relayId,
+           winnerTribeId,
+           tribeA_score: currentState.tribeA_score,
+           tribeB_score: currentState.tribeB_score,
+           winner
+         }).catch(err => fastify.log.error('Tournament broadcast failed:', err));
        }
-    }, 5000);
+       }, 5000);
   }
 }
 

@@ -1,5 +1,14 @@
 import { authenticate, checkAdmin } from '../middleware/auth.js';
-import { awardBadge, awardBadgeWithTribeCap, awardFoundingGeneral, FOUNDING_GENERAL_ID, FOUNDING_CAPTAIN_ID, FOUNDING_THRESHOLD } from '../services/achievementService.js';
+import { 
+  awardBadge, 
+  awardBadgeWithTribeCap, 
+  awardFoundingGeneral, 
+  awardFoundingCenturion,
+  FOUNDING_GENERAL_ID, 
+  FOUNDING_CENTURION_ID,
+  FOUNDING_CAPTAIN_ID, 
+  FOUNDING_THRESHOLD 
+} from '../services/achievementService.js';
 
 const achievementRoutes = async (fastify, options) => {
   // GET /achievements - User's earned badges (requires auth)
@@ -127,6 +136,8 @@ const achievementRoutes = async (fastify, options) => {
       let result = { success: false };
       if (achievementId === FOUNDING_GENERAL_ID) {
         result = await awardFoundingGeneral(fastify, userId, force);
+      } else if (achievementId === FOUNDING_CENTURION_ID) {
+        result = await awardFoundingCenturion(fastify, userId, force);
       } else {
         await fastify.db.query(
           `INSERT INTO user_achievements (user_id, achievement_id, earned_at)
@@ -253,6 +264,87 @@ const achievementRoutes = async (fastify, options) => {
         error: {
           code: 'INTERNAL_ERROR',
           message: 'Failed to award Founding General badge',
+          requestId: request.id,
+        },
+      });
+    }
+  });
+
+  // POST /achievements/award/founding-centurion - Specialized awarding for partner admins (Admin only)
+  // Body: { email, force }
+  fastify.post('/award/founding-centurion', { preHandler: [authenticate, checkAdmin] }, async (request, reply) => {
+    const { email, force = false } = request.body;
+
+    if (!email) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'BAD_REQUEST',
+          message: 'email is required',
+          requestId: request.id,
+        },
+      });
+    }
+
+    try {
+      // Find user by email
+      const userResult = await fastify.db.query(
+        'SELECT id FROM users WHERE email = $1',
+        [email.toLowerCase()]
+      );
+
+      if (userResult.rows.length === 0) {
+        return reply.status(404).send({
+          success: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: 'User with this email not found',
+            requestId: request.id,
+          },
+        });
+      }
+
+      const userId = userResult.rows[0].id;
+
+      // Award the badge with strict tribe cap (max 100) unless forced
+      const result = await awardFoundingCenturion(fastify, userId, force);
+
+      if (!result.success) {
+        const message = result.reason === 'cap_reached' 
+          ? 'Tribe cap reached for Founding Centurion badge. Use force: true to override.'
+          : 'Failed to award Founding Centurion badge.';
+        return reply.status(400).send({
+          success: false,
+          error: {
+            code: result.reason || 'AWARD_FAILED',
+            message,
+            requestId: request.id,
+          },
+        });
+      }
+
+      fastify.log.info({ admin: request.user.id, userId, email, achievementId: FOUNDING_CENTURION_ID }, 'Founding Centurion badge manually awarded');
+
+      return reply.send({
+        success: true,
+        data: {
+          message: `Founding Centurion badge awarded successfully to ${email}`,
+          userId,
+          achievementId: FOUNDING_CENTURION_ID,
+          signupNumber: result.signupNumber,
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+          requestId: request.id,
+        },
+      });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Failed to award Founding Centurion badge',
           requestId: request.id,
         },
       });

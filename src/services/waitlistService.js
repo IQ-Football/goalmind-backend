@@ -5,7 +5,7 @@
 
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
-import { awardBadge, awardBadgeWithTribeCap, FOUNDING_GENERAL_ID, FOUNDING_THRESHOLD } from './achievementService.js';
+import { awardBadge, awardBadgeWithTribeCap, FOUNDING_GENERAL_ID, FOUNDING_THRESHOLD, checkAndAward25kSurgeBadge } from './achievementService.js';
 import { recordReferralAttribution, checkAndAwardMilestoneRewards } from './referralService.js';
 
 // Big 7 Partner Codes Mapping
@@ -133,6 +133,9 @@ export async function registerWaitlistSignup(fastify, { name, email, tribeId, re
       [defaultUsername, email.toLowerCase(), passwordHash, tribe ? tribe.id : null, null, referrerId, cohort]
     );
     const user = userResult.rows[0];
+
+    // Award 25k Surge badge if applicable
+    await checkAndAward25kSurgeBadge(fastify, user.id);
 
     // Generate and update user's unique referral code
     // If no tribe, we use a generic GM_WAIT__ prefix

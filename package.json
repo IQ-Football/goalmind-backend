@@ -8,6 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "db:init": "node src/scripts/initDb.js",
+    "tool:award-badge": "node scripts/award_badge_cli.mjs",
     "worker:matchmaking": "node src/services/matchmakingWorker.js"
   },
   "dependencies": {

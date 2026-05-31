@@ -1,16 +1,16 @@
-import pg from 'pg';
 import config from './src/config.js';
-
-const pool = new pg.Pool({
+import pg from 'pg';
+const { Pool } = pg;
+const pool = new Pool({
   host: config.database.host,
   port: config.database.port,
+  database: config.database.name,
   user: config.database.user,
   password: config.database.password,
-  database: config.database.name
 });
 
 async function run() {
-  const res = await pool.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'");
+  const res = await pool.query("SELECT table_name, table_schema FROM information_schema.tables WHERE table_schema = 'public'");
   console.log(res.rows);
   await pool.end();
 }

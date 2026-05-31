@@ -3,6 +3,7 @@ import config from '../config.js';
 import { calculateTribePoints, recordTribalBattle, areTribesRivals } from './tribeWarScoring.js';
 import { awardLeaguePoints } from './leagueSystemService.js';
 import { getNationPointsMultiplier } from './surgeService.js';
+import { broadcastTournamentUpdate } from './tournamentLeaderboardService.js';
 
 
 // Battle state machine states
@@ -847,8 +848,10 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
        player1_elo_change = $5,
        player2_elo_change = $6,
        tribe_points_awarded = $7,
+       winner_tribe_id = $8,
+       loser_tribe_id = $9,
        ended_at = NOW()
-     WHERE id = $8`,
+     WHERE id = $10`,
     [
       isForfeit ? BATTLE_STATES.ABANDONED : BATTLE_STATES.COMPLETED,
       winnerId,
@@ -857,6 +860,8 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
       p1EloChange,
       p2EloChange,
       tribePointsAwarded,
+      winnerTribeId,
+      winnerTribeId === p1.tribe_id ? p2.tribe_id : p1.tribe_id,
       battleId
     ]
   );
@@ -1009,6 +1014,19 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
     },
     tribePointsEarned: winnerId ? tribePointsAwarded : 0,
   });
+
+  // Broadcast tournament update
+  if (winnerId) {
+    broadcastTournamentUpdate(fastify, {
+      type: 'battle_end',
+      battleId,
+      winnerId,
+      tribeId: winnerTribeId,
+      tribeSlug: winnerTribeId === p1.tribe_id ? p1.tribe_slug : p2.tribe_slug,
+      points: tribePointsAwarded,
+      nationPoints: winnerId === player1Id ? p1NationPoints : p2NationPoints
+    }).catch(err => fastify.log.error('Tournament broadcast failed:', err));
+  }
 
   // Cleanup Redis battle state
   await deleteBattleState(battleId, fastify);
