@@ -1073,7 +1073,7 @@
   {
     "id": "548b947c-4fb3-409a-ba68-34ccf9f462a2",
     "title": "Mobile: Update API/WS to Tunnel URL",
-    "description": "Update the API service and WebSocket configuration in the GoalMind app to use the new Cloudflare Tunnel URL: https://mill-coordinate-national-leather.trycloudflare.com. Verify connectivity to the backend /health and /api/ tribes endpoints.",
+    "description": "Update the API service and WebSocket configuration in the GoalMind app to use the new Cloudflare Tunnel URL: https://content-benchmark-programmer-skip.trycloudflare.com. Verify connectivity to the backend /health and /api/ tribes endpoints.",
     "assigned_to": "agent-mobile-developer",
     "status": "done"
   },

@@ -30,7 +30,7 @@ async function backfill() {
     console.log(`Total users found: ${users.length}`);
 
     let awardedCount = 0;
-    const START_INDEX = 23388;
+    const START_INDEX = 23387;
     const END_INDEX = 25000;
 
     for (let i = 0; i < users.length; i++) {
