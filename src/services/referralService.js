@@ -117,9 +117,18 @@ export async function checkAndAwardMilestoneRewards(fastify, referrerId, milesto
     );
     
     // Credit 200 IQ Coins to recruit
-    await fastify.db.query(
-      `UPDATE users SET gems = COALESCE(gems, 0) + 200 WHERE id = $1`,
+    let rewardGems = 200;
+    const hasAresSurgeRes = await fastify.db.query(
+      "SELECT 1 FROM user_achievements WHERE user_id = $1 AND achievement_id = '4b6c8914-87be-47ea-8942-d64e9a8f2765'",
       [recruitId]
+    );
+    if (hasAresSurgeRes.rows.length > 0) {
+      rewardGems = Math.round(rewardGems * 1.2);
+    }
+
+    await fastify.db.query(
+      `UPDATE users SET gems = COALESCE(gems, 0) + $1 WHERE id = $2`,
+      [rewardGems, recruitId]
     );
   }
   

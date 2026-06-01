@@ -27,15 +27,24 @@ export async function distributeSeasonalRewards(fastify, leagueId, seasonId) {
 
     // 3. For each participant, award GoalTokens and Badges
     for (const p of participants.rows) {
-       const rewardGT = league.reward_goal_tokens || 0;
+       let rewardGT = league.reward_goal_tokens || 0;
        const badgeName = league.reward_badge_name;
+
+       // --- Golden Lightning Multiplier (Ares Surge Badge) ---
+       const hasAresSurgeRes = await client.query(
+         "SELECT 1 FROM user_achievements WHERE user_id = $1 AND achievement_id = '4b6c8914-87be-47ea-8942-d64e9a8f2765'",
+         [p.user_id]
+       );
+       if (hasAresSurgeRes.rows.length > 0) {
+         rewardGT = Math.round(rewardGT * 1.2);
+       }
 
        // Update GoalTokens (using both column and metadata for backward compatibility)
        await client.query(
-         `UPDATE users SET 
+         `UPDATE users SET
           goal_tokens = COALESCE(goal_tokens, 0) + $1,
-          metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{goal_tokens}', 
-          to_jsonb(COALESCE((metadata->>'goal_tokens')::int, 0) + $1)) 
+          metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{goal_tokens}',
+          to_jsonb(COALESCE((metadata->>'goal_tokens')::int, 0) + $1))
           WHERE id = $2`,
          [rewardGT, p.user_id]
        );

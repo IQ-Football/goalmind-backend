@@ -92,18 +92,40 @@ const statusRoutes = async (fastify, options) => {
     }
   });
 
-  // POST /status/decay — Trigger decay job (admin only)
-  fastify.post('/decay', { preHandler: authenticate }, async (request, reply) => {
-    // Only admins can trigger manually
+  // POST /status/trigger-ritual — Trigger 25k milestone ritual (admin only)
+  fastify.post('/trigger-ritual', { preHandler: authenticate }, async (request, reply) => {
     if (request.user.role !== 'admin') {
       return reply.status(403).send({ success: false, error: { code: 'FORBIDDEN', message: 'Admin only' } });
     }
+
     try {
-      const result = await runDailyDecayJob(fastify);
-      return reply.send({ success: true, data: result });
+      const winnerId = '37fe2954-9ab2-4fa8-871e-519dc2e4a120'; // Hardcoded for this milestone
+      const startTime = Date.now();
+      
+      // Store in Redis for new connections
+      await fastify.redis.set('ritual:active', 'true', 'EX', 3600);
+      await fastify.redis.set('ritual:startTime', startTime.toString(), 'EX', 3600);
+
+      // Emit to all namespaces
+      fastify.io.emit('global:milestone_update', { totalUsers: 25091 });
+      fastify.io.emit('global:ritual_trigger', { 
+        active: true,
+        theme: 'golden_fire',
+        startTime,
+        endTime: startTime + 3600000
+      });
+      
+      // Award key to winner specifically (or broadcast if modal is local)
+      fastify.io.emit('global:stadium_key_awarded', { 
+        userId: winnerId,
+        username: 'Vanguard_Warrior_1609',
+        title: 'Stadium Founder'
+      });
+
+      return reply.send({ success: true, message: 'Ritual events emitted' });
     } catch (err) {
       fastify.log.error(err);
-      return reply.status(500).send({ success: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to run decay job' } });
+      return reply.status(500).send({ success: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to emit ritual events' } });
     }
   });
 

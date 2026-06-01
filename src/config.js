@@ -1,6 +1,6 @@
 const config = {
   app: {
-    port: parseInt(process.env.PORT || '8080'),
+    port: parseInt(process.env.PORT || '8081'),
     env: process.env.NODE_ENV || 'development',
   },
   database: {

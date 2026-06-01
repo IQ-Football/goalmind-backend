@@ -29,6 +29,7 @@ import statusRoutes from './routes/status.js';
 import iqProfileRoutes from './routes/iqProfile.js';
 import prestigeRoutes from './routes/prestige.js';
 import relayRoutes from './routes/relay.js';
+import shopRoutes from './routes/shop.js';
 import { setupBattleHandlers } from './services/battleService.js';
 import { setupRelayHandlers } from './services/relayService.js';
 import { setupTournamentHandlers } from './services/tournamentLeaderboardService.js';
@@ -107,6 +108,7 @@ await fastify.register(statusRoutes, { prefix: '/status' });
 await fastify.register(iqProfileRoutes, { prefix: '/users' });
 await fastify.register(prestigeRoutes, { prefix: '/users' });
 await fastify.register(relayRoutes, { prefix: '/relay' });
+await fastify.register(shopRoutes, { prefix: '/shop' });
 
 // Socket.IO setup for real-time battles
 const io = new Server(fastify.server, {
@@ -207,6 +209,27 @@ wc2026Namespace.on('connection', async (socket) => {
     }
   });
 });
+// Root namespace for global events
+io.on('connection', async (socket) => {
+  fastify.log.info(`Global client connected: ${socket.id}`);
+  
+  // Send current milestone status
+  const count = await fastify.redis.get('users:total_count');
+  socket.emit('global:milestone_update', { totalUsers: parseInt(count || '0') });
+  
+  // Check if ritual is active
+  const ritualActive = await fastify.redis.get('ritual:active');
+  if (ritualActive) {
+    const startTime = await fastify.redis.get('ritual:startTime');
+    socket.emit('global:ritual_trigger', { 
+      active: true, 
+      theme: 'golden_fire',
+      startTime: parseInt(startTime || Date.now()),
+      endTime: parseInt(startTime || Date.now()) + 3600000 
+    });
+  }
+});
+
 fastify.decorate('io', io);
 
 // Start server

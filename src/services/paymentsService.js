@@ -144,6 +144,16 @@ export async function handleSuccessfulPayment(fastify, reference, userId, plan, 
     };
 
     const config = planConfig[plan] || { gems: 0, one_time: true };
+    let finalGems = config.gems;
+
+    // --- Golden Lightning Multiplier (Ares Surge Badge) ---
+    const hasAresSurgeRes = await client.query(
+      "SELECT 1 FROM user_achievements WHERE user_id = $1 AND achievement_id = '4b6c8914-87be-47ea-8942-d64e9a8f2765'",
+      [userId]
+    );
+    if (hasAresSurgeRes.rows.length > 0 && finalGems > 0) {
+      finalGems = Math.round(finalGems * 1.2);
+    }
 
     await client.query(
       `UPDATE users SET
@@ -154,13 +164,13 @@ export async function handleSuccessfulPayment(fastify, reference, userId, plan, 
                                ELSE pro_expires_at END,
          last_active_at = NOW()
        WHERE id = $4`,
-      [config.gems, plan, config.duration_days || 30, userId]
+      [finalGems, plan, config.duration_days || 30, userId]
     );
 
     await client.query(
       `INSERT INTO gem_transactions (user_id, amount, currency, provider, reference, type, created_at)
        VALUES ($1, $2, $3, $4, $5, 'purchase', NOW())`,
-      [userId, config.gems, currency, provider, reference]
+      [userId, finalGems, currency, provider, reference]
     );
 
     // Referral Commission Logic (The Recruiter's War-Chest)

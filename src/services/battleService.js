@@ -640,7 +640,8 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
   const p1Result = await fastify.db.query(
     `SELECT u.id, u.elo, u.battles_played, u.battles_won, u.tribe_id, u.cohort, u.metadata, tm.is_vanguard_100,
             t.slug as tribe_slug,
-            (SELECT l.tier FROM league_participants lp JOIN leagues l ON lp.league_id = l.id WHERE lp.user_id = u.id AND l.is_active = true LIMIT 1) as league_tier
+            (SELECT l.tier FROM league_participants lp JOIN leagues l ON lp.league_id = l.id WHERE lp.user_id = u.id AND l.is_active = true LIMIT 1) as league_tier,
+            EXISTS(SELECT 1 FROM user_achievements WHERE user_id = u.id AND achievement_id = '4b6c8914-87be-47ea-8942-d64e9a8f2765') as has_ares_surge
      FROM users u
      LEFT JOIN tribe_members tm ON u.id = tm.user_id
      LEFT JOIN tribes t ON u.tribe_id = t.id
@@ -650,7 +651,8 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
   const p2Result = await fastify.db.query(
     `SELECT u.id, u.elo, u.battles_played, u.battles_won, u.tribe_id, u.cohort, u.metadata, tm.is_vanguard_100,
             t.slug as tribe_slug,
-            (SELECT l.tier FROM league_participants lp JOIN leagues l ON lp.league_id = l.id WHERE lp.user_id = u.id AND l.is_active = true LIMIT 1) as league_tier
+            (SELECT l.tier FROM league_participants lp JOIN leagues l ON lp.league_id = l.id WHERE lp.user_id = u.id AND l.is_active = true LIMIT 1) as league_tier,
+            EXISTS(SELECT 1 FROM user_achievements WHERE user_id = u.id AND achievement_id = '4b6c8914-87be-47ea-8942-d64e9a8f2765') as has_ares_surge
      FROM users u
      LEFT JOIN tribe_members tm ON u.id = tm.user_id
      LEFT JOIN tribes t ON u.tribe_id = t.id
@@ -756,6 +758,10 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
   // Calculate GoalToken (gems) yield
   let p1GemsEarned = (winnerId === player1Id) ? 10 : (winnerId === player2Id ? 2 : 5);
   let p2GemsEarned = (winnerId === player2Id) ? 10 : (winnerId === player1Id ? 2 : 5);
+
+  // --- Golden Lightning Multiplier (Ares Surge Badge) ---
+  if (p1.has_ares_surge) p1GemsEarned = Math.round(p1GemsEarned * 1.2);
+  if (p2.has_ares_surge) p2GemsEarned = Math.round(p2GemsEarned * 1.2);
 
   // --- Soweto Supremacy Derby Window ---
   // Reward: +10% GoalToken yield for all matches played during the weekend window.
