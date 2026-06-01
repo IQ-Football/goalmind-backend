@@ -1,0 +1,64 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  lint-and-test:
+    name: Lint and Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+          cache: 'npm'
+
+      - name: Install Dependencies
+        run: npm install
+
+      - name: Run Linter
+        run: npm run lint --if-present
+
+      - name: Run Tests
+        run: npm test --if-present
+
+  build-and-deploy-stub:
+    name: Build and Staging Deployment (Stub)
+    needs: lint-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Build Application
+        run: |
+          echo "Building GoalMind Backend..."
+          # npm run build --if-present
+
+      - name: Deploy to Staging (Stub)
+        run: |
+          echo "Deploying to staging environment..."
+          # Placeholder for deployment script (e.g., via SSH or Cloud provider CLI)
+          echo "Deployment successful!"
+
+  notifications:
+    name: Notifications
+    needs: build-and-deploy-stub
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify Slack/Discord (Stub)
+        run: |
+          if [[ "${{ needs.build-and-deploy-stub.result }}" == "success" ]]; then
+            echo "SUCCESS: GoalMind Backend CI/CD Pipeline completed."
+          else
+            echo "FAILURE: GoalMind Backend CI/CD Pipeline failed."
+          fi
