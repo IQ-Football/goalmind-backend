@@ -109,6 +109,7 @@ await fastify.register(iqProfileRoutes, { prefix: '/users' });
 await fastify.register(prestigeRoutes, { prefix: '/users' });
 await fastify.register(relayRoutes, { prefix: '/relay' });
 await fastify.register(shopRoutes, { prefix: '/shop' });
+await fastify.register(shopRoutes, { prefix: '/payments' });
 
 // Socket.IO setup for real-time battles
 const io = new Server(fastify.server, {
