@@ -75,3 +75,4 @@ npm run dev
 ### Matchmaking Namespace (`/matchmaking`)
 - `matchmaking:join` - Enter queue
 - `matchmaking:leave` - Exit queue
+// PAT verification commit
