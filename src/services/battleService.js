@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import config from '../config.js';
+import { checkAndProcessBounty } from './continentalCupService.js';
 import { calculateTribePoints, recordTribalBattle, areTribesRivals } from './tribeWarScoring.js';
 import { awardLeaguePoints } from './leagueSystemService.js';
 import { getNationPointsMultiplier } from './surgeService.js';
@@ -928,6 +929,24 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
         [winnerId]
       );
     }
+  }
+
+  // --- Continental Cup Bounty Processing ---
+  try {
+    const bountyResult = await checkAndProcessBounty(fastify, battleId, winnerId);
+    if (bountyResult && bountyResult.isBounty) {
+      fastify.log.info(`Bounty match processed for battle ${battleId}. Multiplier: ${bountyResult.pointsMultiplier}x`);
+      // Update tribe points if it was a bounty (5x)
+      if (winnerId) {
+        const bountyTribePoints = tribePointsAwarded * (bountyResult.pointsMultiplier - 1);
+        await fastify.db.query(
+          'UPDATE tribes SET total_points = total_points + $1 WHERE id = $2',
+          [bountyTribePoints, winnerTribeId]
+        );
+      }
+    }
+  } catch (err) {
+    fastify.log.error(`Error processing bounty for battle ${battleId}: ${err.message}`);
   }
 
   // Reset streak for loser

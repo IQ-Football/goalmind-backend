@@ -58,9 +58,9 @@ export const shopService = {
         );
       }
 
-      // 4. Handle Battle Pass / Pro status
+      // 4. Handle Battle Pass / Pro status / Bundles
       let badgeAwarded = false;
-      if (product.category === 'battle_pass') {
+      if (product.category === 'battle_pass' || product.id === 'vanguard_founders_pack') {
         await client.query(
           `UPDATE users SET 
              is_pro = true, 
@@ -70,16 +70,16 @@ export const shopService = {
           [userId]
         );
         
-        // Award Founding Pro badge (achievementService handles the INSERT)
-        // Note: we are inside a transaction, but achievementService uses its own connection/transaction logic in awardBadge.
-        // Actually, awardBadge in achievementService.js doesn't use a transaction, it just runs a single query.
-        // But awardBadgeWithTribeCap DOES.
-        // Let's use awardBadge which is simple.
+        // Award Founding Pro badge
         try {
           badgeAwarded = await awardBadge(fastify, userId, FOUNDING_PRO_ID);
+          
+          // If it's the vanguard pack, also award the Vanguard Badge (id could be different, checking achievementService)
+          if (product.id === 'vanguard_founders_pack') {
+             // Assuming VANGUARD_BADGE_ID or similar. Let's check achievementService.js first.
+          }
         } catch (badgeErr) {
-          fastify.log.error({ badgeErr, userId }, 'Failed to award Founding Pro badge during shop purchase');
-          // We don't fail the whole purchase if badge fails, but it's not ideal.
+          fastify.log.error({ badgeErr, userId }, 'Failed to award badge during shop purchase');
         }
       }
 

@@ -1,5 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import config from '../config.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const MATCHMAKING_LUA = fs.readFileSync(path.join(__dirname, 'matchmaking.lua'), 'utf8');
 import { BATTLE_STATES, isDailyBattleLimitReached, incrementDailyBattleCount } from './battleService.js';
 
 // Note: matchmakingQueue and socketToUser are now handled primarily through Redis
@@ -84,8 +91,9 @@ export function setupMatchmakingHandlers(matchmakingNamespace, fastify) {
         };
         await fastify.redis.hset(`matchmaking:entry:${socket.userId}`, queueEntry);
 
-        // Add to Redis sorted set for matchmaking
+        // Add to Redis sorted sets for matchmaking
         await fastify.redis.zadd('matchmaking:queue', elo, socket.userId);
+        await fastify.redis.zadd('matchmaking:waitlist', Date.now(), socket.userId);
 
         const position = await getQueuePosition(socket.userId);
         socket.emit('matchmaking:joined', {
@@ -129,7 +137,8 @@ export function setupMatchmakingHandlers(matchmakingNamespace, fastify) {
       fastify.log.info(`Matchmaking client disconnected: ${socket.id}`);
       
       if (socket.userId) {
-        socketToUser.delete(socket.id);
+        localSockets.delete(socket.id);
+        userToSocket.delete(socket.userId);
         await removeFromQueue(socket.userId, fastify);
       }
     });
@@ -139,6 +148,7 @@ export function setupMatchmakingHandlers(matchmakingNamespace, fastify) {
 // Remove user from matchmaking queue
 async function removeFromQueue(userId, fastify) {
   await fastify.redis.zrem('matchmaking:queue', userId);
+  await fastify.redis.zrem('matchmaking:waitlist', userId);
   await fastify.redis.del(`matchmaking:entry:${userId}`);
 }
 
@@ -153,76 +163,9 @@ async function getOpponentSocketId(opponentId, fastify) {
   return await fastify.redis.hget(`session:${opponentId}`, 'socket_id');
 }
 
-// Find a match for a player
-async function findMatch(userId, elo, fastify, namespace) {
-  const queueEntryRaw = await fastify.redis.hgetall(`matchmaking:entry:${userId}`);
-  if (!queueEntryRaw || Object.keys(queueEntryRaw).length === 0) return;
-
-  const queueEntry = {
-    ...queueEntryRaw,
-    elo: parseInt(queueEntryRaw.elo),
-    joinedAt: parseInt(queueEntryRaw.joinedAt),
-  };
-
-  const currentTime = Date.now();
-  const timeInQueue = currentTime - queueEntry.joinedAt;
-  const expansionCount = Math.floor(timeInQueue / config.matchmaking.expansionIntervalMs);
-  
-  // Calculate Elo range (expands every 10 seconds)
-  const eloRange = config.matchmaking.eloRangeInitial + 
-    (config.matchmaking.eloRangeExpansion * expansionCount);
-
-  const minElo = elo - eloRange;
-  const maxElo = elo + eloRange;
-
-  // Get potential opponents from Redis
-  const opponents = await fastify.redis.zrangebyscore(
-    'matchmaking:queue',
-    minElo,
-    maxElo
-  );
-
-  // Filter out self
-  let eligibleOpponents = opponents.filter(oppId => oppId !== userId);
-
-  // Implement Priority Pool logic for Vanguard 500
-  // Spec: Vanguard 500 users get priority access for 5 seconds before falling back to the standard pool.
-  if (queueEntry.cohort === 'vanguard_500' && timeInQueue < 5000) {
-    // Only match with other Vanguard 500 users in the first 5 seconds
-    const opponentCohorts = await Promise.all(
-      eligibleOpponents.map(async (oppId) => {
-        const cohort = await fastify.redis.hget(`matchmaking:entry:${oppId}`, 'cohort');
-        return { id: oppId, cohort };
-      })
-    );
-    eligibleOpponents = opponentCohorts
-      .filter(opp => opp.cohort === 'vanguard_500')
-      .map(opp => opp.id);
-  }
-
-  if (eligibleOpponents.length > 0) {
-    // Pick the first eligible opponent
-    const opponentId = eligibleOpponents[0];
-    
-    // Attempt to atomically remove both from queue to prevent double matching
-    // In a production app, use a Lua script for true atomicity
-    const removed1 = await fastify.redis.zrem('matchmaking:queue', userId);
-    const removed2 = await fastify.redis.zrem('matchmaking:queue', opponentId);
-
-    if (removed1 === 0 || removed2 === 0) {
-      // Someone else got one of them first
-      if (removed1) await fastify.redis.zadd('matchmaking:queue', elo, userId);
-      if (removed2) {
-         const oppElo = await fastify.redis.hget(`matchmaking:entry:${opponentId}`, 'elo');
-         await fastify.redis.zadd('matchmaking:queue', oppElo || 1000, opponentId);
-      }
-      return;
-    }
-
-    // Successfully "claimed" both users
-    await fastify.redis.del(`matchmaking:entry:${userId}`);
-    await fastify.redis.del(`matchmaking:entry:${opponentId}`);
-
+// Successfully matched two users, finalize the battle
+async function finalizeMatch(userId, opponentId, fastify, namespace) {
+  try {
     // Create battle in database
     const battleId = uuidv4();
     await fastify.db.query(
@@ -250,9 +193,8 @@ async function findMatch(userId, elo, fastify, namespace) {
     await fastify.redis.hset(`session:${opponentId}`, 'battle_id', battleId);
 
     // Emit to both players
-    // Using namespace.to(socketId).emit() works across instances with Redis adapter
-    const userSocketId = queueEntry.socketId;
-    const opponentSocketId = await getOpponentSocketId(opponentId, fastify);
+    const userSocketId = await fastify.redis.hget(`session:${userId}`, 'socket_id');
+    const opponentSocketId = await fastify.redis.hget(`session:${opponentId}`, 'socket_id');
 
     if (userSocketId) {
       namespace.to(userSocketId).emit('matchmaking:found', {
@@ -278,7 +220,83 @@ async function findMatch(userId, elo, fastify, namespace) {
       });
     }
 
-    fastify.log.info(`Match found: ${userId} (${elo}) vs ${opponentId} in battle ${battleId}`);
+    fastify.log.info(`Match finalized: ${userId} vs ${opponentId} in battle ${battleId}`);
+  } catch (err) {
+    fastify.log.error(`Error finalizing match: ${err.message}`);
+  }
+}
+
+// Find a match for a player
+async function findMatch(userId, elo, fastify, namespace) {
+  const queueEntryRaw = await fastify.redis.hgetall(`matchmaking:entry:${userId}`);
+  if (!queueEntryRaw || Object.keys(queueEntryRaw).length === 0) return;
+
+  const queueEntry = {
+    ...queueEntryRaw,
+    elo: parseInt(queueEntryRaw.elo),
+    joinedAt: parseInt(queueEntryRaw.joinedAt),
+  };
+
+  const currentTime = Date.now();
+  const timeInQueue = currentTime - queueEntry.joinedAt;
+  const expansionCount = Math.floor(timeInQueue / config.matchmaking.expansionIntervalMs);
+  
+  // Calculate Elo range (expands every 10 seconds)
+  const eloRange = config.matchmaking.eloRangeInitial + 
+    (config.matchmaking.eloRangeExpansion * expansionCount);
+
+  const minElo = elo - eloRange;
+  const maxElo = elo + eloRange;
+
+  // Get potential opponents from Redis (limited to 10 for performance)
+  const opponents = await fastify.redis.zrangebyscore(
+    'matchmaking:queue',
+    minElo,
+    maxElo,
+    'LIMIT', 0, 10
+  );
+
+  // Filter out self
+  let eligibleOpponents = opponents.filter(oppId => oppId !== userId);
+
+  // Implement Priority Pool logic for Vanguard 500
+  // Spec: Vanguard 500 users get priority access for 5 seconds before falling back to the standard pool.
+  if (queueEntry.cohort === 'vanguard_500' && timeInQueue < 5000) {
+    // Only match with other Vanguard 500 users in the first 5 seconds
+    const opponentCohorts = await Promise.all(
+      eligibleOpponents.map(async (oppId) => {
+        const cohort = await fastify.redis.hget(`matchmaking:entry:${oppId}`, 'cohort');
+        return { id: oppId, cohort };
+      })
+    );
+    eligibleOpponents = opponentCohorts
+      .filter(opp => opp.cohort === 'vanguard_500')
+      .map(opp => opp.id);
+  }
+
+  if (eligibleOpponents.length > 0) {
+    // Pick the first eligible opponent
+    const opponentId = eligibleOpponents[0];
+    
+    // Attempt to atomically remove both from queue to prevent double matching
+    const removed1 = await fastify.redis.zrem('matchmaking:queue', userId);
+    const removed2 = await fastify.redis.zrem('matchmaking:queue', opponentId);
+
+    if (removed1 === 0 || removed2 === 0) {
+      // Someone else got one of them first
+      if (removed1) await fastify.redis.zadd('matchmaking:queue', elo, userId);
+      if (removed2) {
+         const oppEloRaw = await fastify.redis.hget(`matchmaking:entry:${opponentId}`, 'elo');
+         await fastify.redis.zadd('matchmaking:queue', parseInt(oppEloRaw) || 1000, opponentId);
+      }
+      return;
+    }
+
+    // Successfully "claimed" both users
+    await fastify.redis.del(`matchmaking:entry:${userId}`);
+    await fastify.redis.del(`matchmaking:entry:${opponentId}`);
+
+    await finalizeMatch(userId, opponentId, fastify, namespace);
   } else {
     // No match found - check for timeout
     if (timeInQueue >= config.matchmaking.timeoutMs) {
@@ -306,27 +324,31 @@ export function startMatchmakingPolling(fastify, namespace) {
   // Poll every 2 seconds for new matches
   setInterval(async () => {
     try {
-      // Get all users currently in the queue from Redis
-      const usersInQueue = await fastify.redis.zrange('matchmaking:queue', 0, -1, 'WITHSCORES');
-      
-      const queueEntries = [];
-      // Redis returns [id1, score1, id2, score2, ...]
-      for (let i = 0; i < usersInQueue.length; i += 2) {
-        const userId = usersInQueue[i];
-        const elo = parseInt(usersInQueue[i+1]);
-        const cohort = await fastify.redis.hget(`matchmaking:entry:${userId}`, 'cohort');
-        queueEntries.push({ userId, elo, cohort });
-      }
+      // Execute high-performance Lua script for matching
+      // Arguments: queue_elo_key, queue_time_key, entries_prefix, current_time, elo_range_initial, elo_range_expansion, expansion_interval, vanguard_priority_ms
+      const matches = await fastify.redis.eval(
+        MATCHMAKING_LUA,
+        2,
+        'matchmaking:queue',
+        'matchmaking:waitlist',
+        'matchmaking:entry:',
+        Date.now(),
+        config.matchmaking.eloRangeInitial,
+        config.matchmaking.eloRangeExpansion,
+        config.matchmaking.expansionIntervalMs,
+        5000 // Vanguard priority window (5 seconds)
+      );
 
-      // Priority: process Vanguard 500 users first
-      queueEntries.sort((a, b) => {
-        if (a.cohort === 'vanguard_500' && b.cohort !== 'vanguard_500') return -1;
-        if (a.cohort !== 'vanguard_500' && b.cohort === 'vanguard_500') return 1;
-        return 0;
-      });
-
-      for (const entry of queueEntries) {
-        await findMatch(entry.userId, entry.elo, fastify, namespace);
+      // Process matches returned by the script
+      if (matches && matches.length > 0) {
+        fastify.log.info(`Lua matchmaking found ${matches.length / 2} matches`);
+        for (let i = 0; i < matches.length; i += 2) {
+          const user1Id = matches[i];
+          const user2Id = matches[i+1];
+          
+          // finalizeMatch handles DB battle creation and socket notifications
+          await finalizeMatch(user1Id, user2Id, fastify, namespace);
+        }
       }
     } catch (err) {
       fastify.log.error('Matchmaking polling error:', err);

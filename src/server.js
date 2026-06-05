@@ -30,6 +30,8 @@ import iqProfileRoutes from './routes/iqProfile.js';
 import prestigeRoutes from './routes/prestige.js';
 import relayRoutes from './routes/relay.js';
 import shopRoutes from './routes/shop.js';
+import continentalCupRoutes from './routes/continentalCup.js';
+import onboardingRoutes from './routes/onboarding.js';
 import { setupBattleHandlers } from './services/battleService.js';
 import { setupRelayHandlers } from './services/relayService.js';
 import { setupTournamentHandlers } from './services/tournamentLeaderboardService.js';
@@ -110,6 +112,8 @@ await fastify.register(prestigeRoutes, { prefix: '/users' });
 await fastify.register(relayRoutes, { prefix: '/relay' });
 await fastify.register(shopRoutes, { prefix: '/shop' });
 await fastify.register(shopRoutes, { prefix: '/payments' });
+await fastify.register(continentalCupRoutes, { prefix: '/continental-cup' });
+await fastify.register(onboardingRoutes, { prefix: '/onboarding' });
 
 // Socket.IO setup for real-time battles
 const io = new Server(fastify.server, {
@@ -246,6 +250,11 @@ const start = async () => {
     // Seed Season 1 Leagues and Vanguard members
     const { seed5TierLeagues } = await import('./services/leagueSystemService.js');
     await seed5TierLeagues(fastify);
+
+    // Pre-warm Onboarding Question Cache
+    const { getTrialBlitzQuestions } = await import('./services/onboardingService.js');
+    await getTrialBlitzQuestions(fastify);
+    fastify.log.info('Onboarding trial questions cached');
 
     // P0-5: Start background jobs (VAR cleanup, prediction validation)
     startBackgroundJobs(fastify);

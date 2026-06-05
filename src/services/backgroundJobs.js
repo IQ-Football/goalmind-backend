@@ -1,5 +1,6 @@
 import config from '../config.js';
 import { processWeeklyPromotionRelegation, checkAndTransitionSeasons } from './leagueSystemService.js';
+import { getActiveSeason, updateAllTpi } from './continentalCupService.js';
 
 /**
  * Background Jobs Service
@@ -15,11 +16,13 @@ const PREDICTION_VALIDATION_INTERVAL_MS = 60 * 60 * 1000; // Every hour
 
 // League System Job intervals
 const SEASON_TRANSITION_CHECK_MS = 60 * 60 * 1000; // Every hour (check for season end/offseason)
+const CONTINENTAL_CUP_UPDATE_MS = 60 * 60 * 1000; // Every hour
 const WEEKLY_PR_CHECK_DAY_MS = 7 * 24 * 60 * 60 * 1000; // Weekly (but we track day-of-week)
 
 let varCleanupTimer = null;
 let predictionValidationTimer = null;
 let seasonTransitionTimer = null;
+let continentalCupTimer = null;
 let weeklyPRTimer = null;
 let lastPRProcessedDay = -1;
 
@@ -49,6 +52,19 @@ export function startBackgroundJobs(fastify) {
       fastify.log.error({ err }, 'Season transition check failed');
     });
   }, SEASON_TRANSITION_CHECK_MS);
+
+  // ─── Continental Cup: TPI Update (every hour) ───────────────────────────
+  continentalCupTimer = setInterval(async () => {
+    try {
+      const season = await getActiveSeason(fastify);
+      if (season) {
+        await updateAllTpi(fastify, season.id);
+        fastify.log.info(`Continental Cup TPI updated for season ${season.name}`);
+      }
+    } catch (err) {
+      fastify.log.error({ err }, 'Continental Cup TPI update failed');
+    }
+  }, CONTINENTAL_CUP_UPDATE_MS);
 
   // ─── League System: Weekly P&R (every hour, but only runs on Sunday) ────
   weeklyPRTimer = setInterval(() => {
@@ -80,6 +96,7 @@ export function stopBackgroundJobs() {
   if (varCleanupTimer) clearInterval(varCleanupTimer);
   if (predictionValidationTimer) clearInterval(predictionValidationTimer);
   if (seasonTransitionTimer) clearInterval(seasonTransitionTimer);
+  if (continentalCupTimer) clearInterval(continentalCupTimer);
   if (weeklyPRTimer) clearInterval(weeklyPRTimer);
 }
 

@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import config from '../config.js';
 import otpService from '../services/otpService.js';
 import referralService from '../services/referralService.js';
+import onboardingService from '../services/onboardingService.js';
 import { processTribalCatchup } from '../services/tribeIdentityService.js';
 
 const authRoutes = async (fastify, options) => {
@@ -18,11 +19,12 @@ const authRoutes = async (fastify, options) => {
           password: { type: 'string', minLength: 6 },
           tribeId: { type: 'string', format: 'uuid' },
           referralCode: { type: 'string' },
+          sessionId: { type: 'string' },
         },
       },
     },
   }, async (request, reply) => {
-    const { username, email, password, tribeId, referralCode } = request.body;
+    const { username, email, password, tribeId, referralCode, sessionId } = request.body;
 
     try {
       // Check if user exists
@@ -145,6 +147,13 @@ const authRoutes = async (fastify, options) => {
         username,
         tribeId,
       });
+
+      // Merge Guest Data if sessionId provided
+      if (sessionId) {
+        await onboardingService.mergeGuestData(fastify, sessionId, userId).catch(err => {
+          fastify.log.error({ err, sessionId, userId }, 'Failed to merge guest data during registration');
+        });
+      }
 
       return reply.status(201).send({
         success: true,
@@ -302,11 +311,12 @@ const authRoutes = async (fastify, options) => {
           username: { type: 'string', minLength: 3, maxLength: 50 },
           tribeId: { type: 'string', format: 'uuid' },
           referralCode: { type: 'string' },
+          sessionId: { type: 'string' },
         },
       },
     },
   }, async (request, reply) => {
-    const { phoneNumber, code, username, tribeId, referralCode } = request.body;
+    const { phoneNumber, code, username, tribeId, referralCode, sessionId } = request.body;
     
     try {
       const otpResult = await otpService.verifyOTP(fastify, phoneNumber, code);
@@ -478,6 +488,13 @@ const authRoutes = async (fastify, options) => {
         username: user.username,
         tribeId: user.tribe_id,
       });
+
+      // Merge Guest Data if sessionId provided
+      if (sessionId) {
+        await onboardingService.mergeGuestData(fastify, sessionId, user.id).catch(err => {
+          fastify.log.error({ err, sessionId, userId: user.id }, 'Failed to merge guest data during OTP verification');
+        });
+      }
 
       return reply.send({
         success: true,
