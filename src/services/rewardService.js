@@ -1,4 +1,4 @@
-import { FOUNDING_GENERAL_ID } from './achievementService.js';
+import { FOUNDING_GENERAL_ID, awardBadgeWithClient } from './achievementService.js';
 import { broadcastTournamentUpdate } from './tournamentLeaderboardService.js';
 
 /**
@@ -140,10 +140,7 @@ export async function finalizeRelayTournament(fastify, relayId, winnerTribeId, p
     // 2. Award Eternal Titan badge to winners
     const ETERNAL_TITAN_ID = '550e8400-e29b-41d4-a716-446655440007';
     for (const userId of participants) {
-      await client.query(
-        'INSERT INTO user_achievements (user_id, achievement_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
-        [userId, ETERNAL_TITAN_ID]
-      );
+      await awardBadgeWithClient(client, userId, ETERNAL_TITAN_ID, fastify.log);
       
       // 3. Induct to Hall of Generals
       await inductToHallOfGenerals(fastify, userId, 'Season 1 Relay Winner');
@@ -208,15 +205,13 @@ export async function applySeasonWealthTax(fastify) {
 
       const updatedMetadata = {
         ...metadata,
-        legacy_xp: newLegacyXP,
-        arena_level: arenaLevel,
         s1_final_gt: currentGT,
         wealth_tax_applied_at: new Date().toISOString()
       };
 
       await client.query(
-        'UPDATE users SET goal_tokens = $1, metadata = $2 WHERE id = $3',
-        [newGT, JSON.stringify(updatedMetadata), user.id]
+        'UPDATE users SET goal_tokens = $1, legacy_xp = $2, arena_level = $3, metadata = $4 WHERE id = $5',
+        [newGT, newLegacyXP, arenaLevel, JSON.stringify(updatedMetadata), user.id]
       );
       
       processedCount++;

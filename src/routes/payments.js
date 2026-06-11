@@ -103,6 +103,7 @@ const paymentsRoutes = async (fastify, options) => {
       `tribe_gems_100_eur`, `tribe_gems_500_eur`, `tribe_gems_1200_eur`,
       'tribe_transfer_gbp', 'tribe_transfer_eur',
       'goal_tokens_impulse', 'goal_tokens_warrior', 'goal_tokens_tribe_leader',
+      'tournament_entry', 'badge_unlock',
     ];
 
     if (!planId || !validPlans.some(p => planId === p)) {

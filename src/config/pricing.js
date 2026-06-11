@@ -18,6 +18,10 @@ export const REGIONAL_CONFIG = {
       impulse: { price: 19.99, label: 'R19.99' },
       warrior: { price: 79.99, label: 'R79.99' },
       tribe_leader: { price: 199.99, label: 'R199.99' },
+    },
+    prestige: {
+      tournament_entry: { price: 9.99, label: 'R9.99' },
+      badge_unlock: { price: 49.99, label: 'R49.99' }
     }
   },
   NGN: {
@@ -32,6 +36,11 @@ export const REGIONAL_CONFIG = {
       impulse: { price: 1500, label: '₦1,500' },
       warrior: { price: 6000, label: '₦6,000' },
       tribe_leader: { price: 15000, label: '₦15,000' },
+    },
+    prestige: {
+      tournament_entry: { price: 1000, label: '₦1,000' },
+      badge_unlock: { price: 5000, label: '₦5,000' },
+      lagos_pro_starter: { price: 500, label: '₦500' }
     }
   },
   KES: {
@@ -46,6 +55,10 @@ export const REGIONAL_CONFIG = {
       impulse: { price: 130, label: 'KSh 130' },
       warrior: { price: 520, label: 'KSh 520' },
       tribe_leader: { price: 1300, label: 'KSh 1,300' },
+    },
+    prestige: {
+      tournament_entry: { price: 100, label: 'KSh 100' },
+      badge_unlock: { price: 500, label: 'KSh 500' }
     }
   },
   GHS: {

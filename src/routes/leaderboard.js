@@ -88,8 +88,8 @@ const leaderboardRoutes = async (fastify, options) => {
           }
         }
         updatedAt = new Date().toISOString();
-        // Cache for 30 seconds
-        await fastify.redis.set(cacheKey, JSON.stringify({ leaderboard, updatedAt }), 'EX', 30);
+        // Cache for 60 seconds (optimized for 50k surge)
+        await fastify.redis.set(cacheKey, JSON.stringify({ leaderboard, updatedAt }), 'EX', 60);
       }
 
       // Get current user's rank (always fresh)
@@ -131,53 +131,77 @@ const leaderboardRoutes = async (fastify, options) => {
   // GET /leaderboard/tribal - Tribe power rankings
   fastify.get('/tribal', async (request, reply) => {
     const { limit = 100 } = request.query;
+    const cacheKey = `cache:leaderboard:tribal:${limit}`;
 
     try {
-      // Get top tribes from Redis
-      const topTribes = await fastify.redis.zrevrange(
-        'leaderboard:tribal',
-        0,
-        Math.min(limit - 1, 99),
-        'WITHSCORES'
-      );
+      let leaderboard;
+      let updatedAt;
 
-      // Parse Redis response
-      const leaderboard = [];
-      for (let i = 0; i < topTribes.length; i += 2) {
-        const tribeId = topTribes[i];
-        const points = parseInt(topTribes[i + 1]);
-
-        // Get tribe details from PostgreSQL
-        const tribeResult = await fastify.db.query(
-          `SELECT id, name, type, slug, logo_url, primary_color, secondary_color, member_count
-           FROM tribes WHERE id = $1`,
-          [tribeId]
+      // Try cache
+      const cached = await fastify.redis.get(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        leaderboard = parsed.leaderboard;
+        updatedAt = parsed.updatedAt;
+      } else {
+        // Get top tribes from Redis
+        const topTribes = await fastify.redis.zrevrange(
+          'leaderboard:tribal',
+          0,
+          Math.min(limit - 1, 99),
+          'WITHSCORES'
         );
 
-        if (tribeResult.rows.length > 0) {
-          const tribe = tribeResult.rows[0];
-          leaderboard.push({
-            rank: leaderboard.length + 1,
-            tribeId,
-            name: tribe.name,
-            type: tribe.type,
-            slug: tribe.slug,
-            logoUrl: tribe.logo_url,
-            colors: {
-              primary: tribe.primary_color,
-              secondary: tribe.secondary_color,
-            },
-            points: points || 0,
-            memberCount: tribe.member_count,
-          });
+        // Parse Redis response
+        const tribeIds = [];
+        const scoreMap = new Map();
+        for (let i = 0; i < topTribes.length; i += 2) {
+          tribeIds.push(topTribes[i]);
+          scoreMap.set(topTribes[i], parseInt(topTribes[i + 1]));
         }
+
+        leaderboard = [];
+        if (tribeIds.length > 0) {
+          // Get tribe details from PostgreSQL in one query
+          const tribesResult = await fastify.db.query(
+            `SELECT id, name, type, slug, logo_url, primary_color, secondary_color, member_count
+             FROM tribes WHERE id = ANY($1)`,
+            [tribeIds]
+          );
+
+          // Map back to maintain Redis order
+          const tribeMap = new Map(tribesResult.rows.map(t => [t.id, t]));
+          
+          for (const tid of tribeIds) {
+            const tribe = tribeMap.get(tid);
+            if (tribe) {
+              leaderboard.push({
+                rank: leaderboard.length + 1,
+                tribeId: tid,
+                name: tribe.name,
+                type: tribe.type,
+                slug: tribe.slug,
+                logoUrl: tribe.logo_url,
+                colors: {
+                  primary: tribe.primary_color,
+                  secondary: tribe.secondary_color,
+                },
+                points: scoreMap.get(tid) || 0,
+                memberCount: tribe.member_count,
+              });
+            }
+          }
+        }
+        updatedAt = new Date().toISOString();
+        // Cache for 120 seconds (optimized for 50k surge)
+        await fastify.redis.set(cacheKey, JSON.stringify({ leaderboard, updatedAt }), 'EX', 120);
       }
 
       return reply.send({
         success: true,
         data: {
           leaderboard,
-          updatedAt: new Date().toISOString(),
+          updatedAt,
         },
         meta: {
           timestamp: new Date().toISOString(),
@@ -211,8 +235,8 @@ const leaderboardRoutes = async (fastify, options) => {
         leaderboard = JSON.parse(cached);
       } else {
         leaderboard = await getAfricanPowerTable(fastify, Math.min(parseInt(limit), 12));
-        // Cache for 60 seconds (African Giants moves slower than global)
-        await fastify.redis.set(cacheKey, JSON.stringify(leaderboard), 'EX', 60);
+        // Cache for 300 seconds (optimized for 50k surge)
+        await fastify.redis.set(cacheKey, JSON.stringify(leaderboard), 'EX', 300);
       }
 
       return reply.send({
@@ -251,38 +275,48 @@ const leaderboardRoutes = async (fastify, options) => {
   fastify.get('/africa', async (request, reply) => {
     const { limit = 100 } = request.query;
     const userId = request.user.id;
+    const cacheKey = `cache:leaderboard:africa:${limit}`;
 
     try {
-      // Get users in African Giants clubs, sorted by ELO
-      const usersResult = await fastify.db.query(
-        `SELECT u.id, u.username, u.elo, t.id as tribe_id, t.name as tribe_name, t.slug as tribe_slug,
-                t.primary_color, t.secondary_color
-         FROM users u
-         JOIN tribes t ON u.tribe_id = t.id
-         WHERE t.slug = ANY($1) AND u.elo IS NOT NULL
-         ORDER BY u.elo DESC
-         LIMIT $2`,
-        [Array.from(AFRICAN_CLUB_SLUGS), limit]
-      );
-
-      const leaderboard = usersResult.rows.map((row, idx) => ({
-        rank: idx + 1,
-        userId: row.id,
-        username: row.username,
-        elo: row.elo,
-        tribe: {
-          id: row.tribe_id,
-          name: row.tribe_name,
-          slug: row.tribe_slug,
-          colors: {
-            primary: row.primary_color,
-            secondary: row.secondary_color,
-          },
-        },
-      }));
-
-      // Get current user's rank if they belong to an African club
+      let leaderboard;
       let userRank = null;
+
+      const cached = await fastify.redis.get(cacheKey);
+      if (cached) {
+        leaderboard = JSON.parse(cached);
+      } else {
+        // Get users in African Giants clubs, sorted by ELO
+        const usersResult = await fastify.db.query(
+          `SELECT u.id, u.username, u.elo, t.id as tribe_id, t.name as tribe_name, t.slug as tribe_slug,
+                  t.primary_color, t.secondary_color
+           FROM users u
+           JOIN tribes t ON u.tribe_id = t.id
+           WHERE t.slug = ANY($1) AND u.elo IS NOT NULL
+           ORDER BY u.elo DESC
+           LIMIT $2`,
+          [Array.from(AFRICAN_CLUB_SLUGS), limit]
+        );
+
+        leaderboard = usersResult.rows.map((row, idx) => ({
+          rank: idx + 1,
+          userId: row.id,
+          username: row.username,
+          elo: row.elo,
+          tribe: {
+            id: row.tribe_id,
+            name: row.tribe_name,
+            slug: row.tribe_slug,
+            colors: {
+              primary: row.primary_color,
+              secondary: row.secondary_color,
+            },
+          },
+        }));
+
+        await fastify.redis.set(cacheKey, JSON.stringify(leaderboard), 'EX', 120);
+      }
+
+      // Get current user's rank if they belong to an African club (always fresh)
       const userResult = await fastify.db.query(
         `SELECT u.elo, u.tribe_id, t.slug as tribe_slug
          FROM users u
@@ -338,9 +372,17 @@ const leaderboardRoutes = async (fastify, options) => {
   // Uses the full scoring formula: Waitlist×1.0 + Avg_IQ×0.5 + Engagement×0.3
   fastify.get('/africa/tribal', async (request, reply) => {
     const { limit = 12 } = request.query;
+    const cacheKey = `cache:leaderboard:africa:tribal:${limit}`;
 
     try {
-      const leaderboard = await getAfricanPowerTable(fastify, Math.min(parseInt(limit), 12));
+      let leaderboard;
+      const cached = await fastify.redis.get(cacheKey);
+      if (cached) {
+        leaderboard = JSON.parse(cached);
+      } else {
+        leaderboard = await getAfricanPowerTable(fastify, Math.min(parseInt(limit), 12));
+        await fastify.redis.set(cacheKey, JSON.stringify(leaderboard), 'EX', 300);
+      }
 
       return reply.send({
         success: true,

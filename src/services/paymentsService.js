@@ -9,7 +9,7 @@
 
 import crypto from 'crypto';
 import { createCheckoutSession, retrieveCheckoutSession, handleStripePaymentSuccess, createCustomerPortalSession, refundStripePayment as stripeRefund, verifyStripeWebhookSignature as stripeVerify, EUROPE_PRICING } from './stripeService.js';
-import { awardBadge, FOUNDING_PRO_ID } from './achievementService.js';
+import { awardBadge, FOUNDING_PRO_ID, EKO_VANGUARD_ID } from './achievementService.js';
 import { initializeMockPayment } from './mockPaymentsService.js';
 import { REGIONAL_CONFIG, GOAL_TOKEN_PACKS } from '../config/pricing.js';
 
@@ -153,6 +153,10 @@ export async function handleSuccessfulPayment(fastify, reference, userId, plan, 
       goal_tokens_impulse: { goal_tokens: 50, one_time: true },
       goal_tokens_warrior: { goal_tokens: 250, one_time: true },
       goal_tokens_tribe_leader: { goal_tokens: 1000, one_time: true },
+      // Prestige Monetization
+      tournament_entry: { one_time: true, type: 'tournament_entry' },
+      badge_unlock: { one_time: true, type: 'badge_unlock' },
+      lagos_pro_starter: { goal_tokens: 500, one_time: true, type: 'lagos_pro_starter' }
     };
 
     const config = planConfig[plan] || { gems: 0, goal_tokens: 0, one_time: true };
@@ -169,6 +173,31 @@ export async function handleSuccessfulPayment(fastify, reference, userId, plan, 
        WHERE id = $5`,
       [config.gems || 0, config.goal_tokens || 0, plan, config.duration_days || 30, userId]
     );
+
+    // Specific logic for tournament entry or badge unlock
+    if (config.type === 'tournament_entry') {
+        // Log tournament entry intent - would typically join a table
+        await client.query(
+            'INSERT INTO system_events (event_type, user_id, metadata) VALUES ($1, $2, $3)',
+            ['TOURNAMENT_ENTRY_PAID', userId, JSON.stringify({ reference, plan })]
+        );
+    } else if (config.type === 'badge_unlock') {
+        // Logic to award a generic prestige badge or handle via metadata
+        const badgeId = '770e8400-e29b-41d4-a716-446655440005'; // Example: Paid Prestige Badge
+        await awardBadge(fastify, userId, badgeId);
+    } else if (config.type === 'lagos_pro_starter') {
+        // Lagos Pro Starter Logic
+        await awardBadge(fastify, userId, EKO_VANGUARD_ID);
+        
+        // 1.2x Multiplier for 24h
+        await client.query(
+          `UPDATE users SET 
+             active_multiplier = 1.20,
+             multiplier_expires_at = NOW() + INTERVAL '24 hours'
+           WHERE id = $1`,
+          [userId]
+        );
+    }
 
     if (config.gems > 0) {
       await client.query(
@@ -331,7 +360,7 @@ export const ZAR = {
   },
 };
 
-export { EUROPE_PRICING };
+export { EUROPE_PRICING, REGIONAL_CONFIG, GOAL_TOKEN_PACKS };
 
 // ─── Unified initialize for all currencies ─────────────────────────────────
 
@@ -384,6 +413,11 @@ function getAmountForPlan(planId, currency) {
     const packId = planId.replace('goal_tokens_', '');
     return regional?.packs?.[packId]?.price || GOAL_TOKEN_PACKS[packId]?.priceUSD || 0;
   }
+
+  // Prestige items
+  if (planId === 'tournament_entry') return regional?.prestige?.tournament_entry?.price || 5.00;
+  if (planId === 'badge_unlock') return regional?.prestige?.badge_unlock?.price || 25.00;
+  if (planId === 'lagos_pro_starter') return regional?.prestige?.lagos_pro_starter?.price || 5.00;
 
   // Gem packs (Legacy ZAR logic)
   if (upperCurrency === 'ZAR') {

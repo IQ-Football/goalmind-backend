@@ -3,7 +3,10 @@ import config from '../config.js';
 import { calculateTribePoints, recordTribalBattle, areTribesRivals } from './tribeWarScoring.js';
 import { awardLeaguePoints } from './leagueSystemService.js';
 import { getNationPointsMultiplier } from './surgeService.js';
+import { getDerbyMultipliers } from './derbyService.js';
 import { broadcastTournamentUpdate } from './tournamentLeaderboardService.js';
+import { creditTokens, TRANSACTION_TYPES } from './goalTokenService.js';
+import { recordWin as recordGizaWin } from './imperialConflictService.js';
 
 
 // Battle state machine states
@@ -37,6 +40,7 @@ async function getBattleState(battleId, fastify) {
     player1_id: data.player1_id,
     player2_id: data.player2_id,
     status: data.status,
+    sector: data.sector || null,
     player1_score: parseInt(data.player1_score || '0'),
     player2_score: parseInt(data.player2_score || '0'),
     player1_streak: parseInt(data.player1_streak || '0'),
@@ -56,6 +60,7 @@ async function setBattleState(battleId, state, fastify) {
     player1_id: state.player1_id,
     player2_id: state.player2_id,
     status: state.status,
+    sector: state.sector || '',
     player1_score: String(state.player1_score || 0),
     player2_score: String(state.player2_score || 0),
     player1_streak: String(state.player1_streak || 0),
@@ -131,19 +136,47 @@ export async function getDailyBattleStats(fastify, userId) {
  * Increment daily battle count for a user
  */
 export async function incrementDailyBattleCount(fastify, userId) {
-  // 1. Deduct a Battle Token if the user is not Pro
-  const userResult = await fastify.db.query('SELECT is_pro, battle_tokens FROM users WHERE id = $1', [userId]);
-  const user = userResult.rows[0];
+  const client = await fastify.db.connect();
+  try {
+    await client.query('BEGIN');
+    
+    // 1. Deduct a Battle Token if the user is not Pro (Row-level lock for stability)
+    const userResult = await client.query('SELECT is_pro, battle_tokens FROM users WHERE id = $1 FOR UPDATE', [userId]);
+    const user = userResult.rows[0];
 
-  if (user && !user.is_pro && user.battle_tokens > 0) {
-    await fastify.db.query('UPDATE users SET battle_tokens = battle_tokens - 1 WHERE id = $1', [userId]);
+    if (user && !user.is_pro && user.battle_tokens > 0) {
+      await client.query('UPDATE users SET battle_tokens = battle_tokens - 1 WHERE id = $1', [userId]);
+    }
+    
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    fastify.log.error({ err, userId }, 'Failed to deduct battle token');
+    // Continue anyway to record the count in Redis
+  } finally {
+    client.release();
   }
 
   // 2. Also increment the Redis counter for legacy/stats tracking
   const today = new Date().toISOString().split('T')[0];
   const key = `user:${userId}:battles_count:${today}`;
-  await fastify.redis.incr(key);
+  const count = await fastify.redis.incr(key);
   await fastify.redis.expire(key, 86400 * 2); // 2 days TTL to be safe
+
+  // 3. Award Daily 3 Loop bonus if exactly 3 battles played today
+  if (count === 3) {
+    try {
+      await creditTokens(fastify, {
+        userId,
+        amount: 50,
+        type: TRANSACTION_TYPES.DAILY_3_LOOP,
+        referenceId: `daily3:${userId}:${today}`
+      });
+      fastify.log.info({ userId }, 'Awarded Daily 3 Loop bonus');
+    } catch (err) {
+      fastify.log.error({ err, userId }, 'Failed to award Daily 3 Loop bonus');
+    }
+  }
 }
 
 export function setupBattleHandlers(battleNamespace, fastify) {
@@ -753,9 +786,15 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
     }
   }
 
-  // Calculate GoalToken (gems) yield
-  let p1GemsEarned = (winnerId === player1Id) ? 10 : (winnerId === player2Id ? 2 : 5);
-  let p2GemsEarned = (winnerId === player2Id) ? 10 : (winnerId === player1Id ? 2 : 5);
+  // Calculate GoalToken (GT) yield
+  // Spec: Win 20, Loss 5. Draw: 10.
+  let p1GTAmount = (winnerId === player1Id) ? 20 : (winnerId === player2Id ? 5 : 10);
+  let p2GTAmount = (winnerId === player2Id) ? 20 : (winnerId === player1Id ? 5 : 10);
+
+  // Apply Derby Window GoalToken multipliers
+  const derbyMultipliers = await getDerbyMultipliers(fastify);
+  p1GTAmount = Math.round(p1GTAmount * derbyMultipliers.goal_tokens);
+  p2GTAmount = Math.round(p2GTAmount * derbyMultipliers.goal_tokens);
 
   // --- Soweto Supremacy Derby Window ---
   // Reward: +10% GoalToken yield for all matches played during the weekend window.
@@ -765,9 +804,24 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
   const isWeekend = now.getDay() === 0 || now.getDay() === 6; // Sun=0, Sat=6
 
   if (isSowetoDerby && isWeekend) {
-    p1GemsEarned = Math.round(p1GemsEarned * 1.1);
-    p2GemsEarned = Math.round(p2GemsEarned * 1.1);
+    p1GTAmount = Math.round(p1GTAmount * 1.1);
+    p2GTAmount = Math.round(p2GTAmount * 1.1);
   }
+
+  // Award GT via Ledger Service (handles Vanguard multipliers)
+  await creditTokens(fastify, {
+    userId: player1Id,
+    amount: p1GTAmount,
+    type: winnerId === player1Id ? TRANSACTION_TYPES.BATTLE_WIN : (winnerId === player2Id ? TRANSACTION_TYPES.BATTLE_LOSS : TRANSACTION_TYPES.BATTLE_DRAW),
+    referenceId: battleId
+  });
+
+  await creditTokens(fastify, {
+    userId: player2Id,
+    amount: p2GTAmount,
+    type: winnerId === player2Id ? TRANSACTION_TYPES.BATTLE_WIN : (winnerId === player1Id ? TRANSACTION_TYPES.BATTLE_LOSS : TRANSACTION_TYPES.BATTLE_DRAW),
+    referenceId: battleId
+  });
 
   // --- Kariakoo Derby Window ---
   // Reward: "City Master" title for the player with the most derby wins in Season 1.
@@ -838,20 +892,36 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
   p1NationPoints = Math.round(p1NationPoints * getNationPointsMultiplier(p1.tribe_slug));
   p2NationPoints = Math.round(p2NationPoints * getNationPointsMultiplier(p2.tribe_slug));
 
+  // --- Imperial Conflict: Siege of Giza ---
+  let gizaPPAwarded = 0;
+  if (battle.sector && winnerId) {
+    try {
+      const winnerTribe = winnerId === player1Id ? p1 : p2;
+      const gizaResult = await recordGizaWin(fastify, winnerId, winnerTribe.tribe_id, battle.sector);
+      if (gizaResult) {
+        gizaPPAwarded = gizaResult.pp;
+        fastify.log.info({ battleId, sector: battle.sector, pp: gizaPPAwarded }, 'Imperial Conflict PP awarded');
+      }
+    } catch (e) {
+      fastify.log.error(`Battle ${battleId}: Giza win recording failed: ${e.message}`);
+    }
+  }
+
   // Update battle in database
   await fastify.db.query(
-    `UPDATE battles SET 
-       status = $1, 
-       winner_id = $2, 
-       player1_score = $3, 
+    `UPDATE battles SET
+       status = $1,
+       winner_id = $2,
+       player1_score = $3,
        player2_score = $4,
        player1_elo_change = $5,
        player2_elo_change = $6,
        tribe_points_awarded = $7,
        winner_tribe_id = $8,
        loser_tribe_id = $9,
+       giza_pp_awarded = $10,
        ended_at = NOW()
-     WHERE id = $10`,
+     WHERE id = $11`,
     [
       isForfeit ? BATTLE_STATES.ABANDONED : BATTLE_STATES.COMPLETED,
       winnerId,
@@ -862,32 +932,31 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
       tribePointsAwarded,
       winnerTribeId,
       winnerTribeId === p1.tribe_id ? p2.tribe_id : p1.tribe_id,
+      gizaPPAwarded,
       battleId
     ]
   );
 
-  // Update player stats including Nation Points and GoalTokens (gems)
+  // Update player stats including Nation Points
   await fastify.db.query(
     `UPDATE users SET
        elo = elo + $1,
        nation_points = COALESCE(nation_points, 0) + $2,
-       gems = COALESCE(gems, 0) + $3,
        battles_played = battles_played + 1,
-       battles_won = battles_won + CASE WHEN id = $4 THEN 1 ELSE 0 END,
+       battles_won = battles_won + CASE WHEN id = $3 THEN 1 ELSE 0 END,
        last_active_at = NOW()
-     WHERE id = $5`,
-    [p1EloChange, p1NationPoints, p1GemsEarned, winnerId, player1Id]
+     WHERE id = $4`,
+    [p1EloChange, p1NationPoints, winnerId, player1Id]
   );
   await fastify.db.query(
     `UPDATE users SET
        elo = elo + $1,
        nation_points = COALESCE(nation_points, 0) + $2,
-       gems = COALESCE(gems, 0) + $3,
        battles_played = battles_played + 1,
-       battles_won = battles_won + CASE WHEN id = $4 THEN 1 ELSE 0 END,
+       battles_won = battles_won + CASE WHEN id = $3 THEN 1 ELSE 0 END,
        last_active_at = NOW()
-     WHERE id = $5`,
-    [p2EloChange, p2NationPoints, p2GemsEarned, winnerId, player2Id]
+     WHERE id = $4`,
+    [p2EloChange, p2NationPoints, winnerId, player2Id]
   );
 
   // --- Season 1 Streak Rewards ---

@@ -11,7 +11,7 @@ async function dbPlugin(fastify, options) {
     database: config.database.name,
     user: config.database.user,
     password: config.database.password,
-    max: 20,
+    max: 500,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 2000,
   });

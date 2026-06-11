@@ -8,7 +8,7 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "db:init": "node src/scripts/initDb.js",
-    "tool:award-badge": "node scripts/award_badge_cli.mjs",
+    "tool:award-badge": "node scripts/manual_award_founding_general.mjs",
     "worker:matchmaking": "node src/services/matchmakingWorker.js"
   },
   "dependencies": {
@@ -24,7 +24,7 @@
     "fastify-plugin": "^4.5.1",
     "ioredis": "^5.3.2",
     "jsonwebtoken": "^9.0.3",
-    "pg": "^8.11.3",
+    "pg": "^8.21.0",
     "pino": "^8.19.0",
     "pino-pretty": "^10.3.1",
     "socket.io": "^4.7.4",

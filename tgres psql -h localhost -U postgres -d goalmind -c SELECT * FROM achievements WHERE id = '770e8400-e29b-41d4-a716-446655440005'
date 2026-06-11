@@ -1,0 +1,86 @@
+                                         Table "public.users"
+        Column         |           Type           | Collation | Nullable |           Default           
+-----------------------+--------------------------+-----------+----------+-----------------------------
+ id                    | uuid                     |           | not null | gen_random_uuid()
+ username              | character varying(50)    |           | not null | 
+ email                 | character varying(255)   |           | not null | 
+ password_hash         | character varying(255)   |           | not null | 
+ tribe_id              | uuid                     |           |          | 
+ elo                   | integer                  |           |          | 1000
+ battles_played        | integer                  |           |          | 0
+ battles_won           | integer                  |           |          | 0
+ last_active_at        | timestamp with time zone |           |          | 
+ created_at            | timestamp with time zone |           |          | now()
+ metadata              | jsonb                    |           |          | '{}'::jsonb
+ role                  | character varying(20)    |           |          | 'user'::character varying
+ referral_count        | integer                  |           |          | 0
+ referred_by           | uuid                     |           |          | 
+ referral_code         | character varying(50)    |           |          | 
+ nation_points         | integer                  |           |          | 0
+ gems                  | integer                  |           |          | 0
+ is_pro                | boolean                  |           |          | false
+ pro_expires_at        | timestamp with time zone |           |          | 
+ battle_tokens         | integer                  |           |          | 5
+ last_token_refill_at  | timestamp with time zone |           |          | now()
+ cohort                | character varying(50)    |           |          | 
+ oracle_status         | character varying        |           |          | 
+ last_herald_horn_at   | timestamp with time zone |           |          | 
+ title                 | character varying(100)   |           |          | 
+ streak_days           | integer                  |           |          | 0
+ decay_immunity_days   | integer                  |           |          | 0
+ blitz_buffer_active   | boolean                  |           |          | false
+ status                | character varying(50)    |           |          | 'active'::character varying
+ contribution_points   | integer                  |           |          | 0
+ national_tribe_id     | uuid                     |           |          | 
+ profile_frame         | character varying(100)   |           |          | 
+ rewards_claimed_at    | timestamp with time zone |           |          | 
+ goal_tokens           | integer                  |           |          | 0
+ legacy_xp             | integer                  |           |          | 0
+ is_senate_member      | boolean                  |           |          | false
+ has_obsidian_glow     | boolean                  |           |          | false
+ active_multiplier     | numeric(4,2)             |           |          | 1.0
+ multiplier_expires_at | timestamp with time zone |           |          | 
+Indexes:
+    "users_pkey" PRIMARY KEY, btree (id)
+    "idx_users_cohort" btree (cohort)
+    "idx_users_elo" btree (elo DESC)
+    "idx_users_senate" btree (is_senate_member)
+    "idx_users_tribe" btree (tribe_id)
+    "users_email_key" UNIQUE CONSTRAINT, btree (email)
+    "users_username_key" UNIQUE CONSTRAINT, btree (username)
+Check constraints:
+    "users_role_check" CHECK (role::text = ANY (ARRAY['user'::character varying, 'admin'::character varying, 'moderator'::character varying]::text[]))
+Foreign-key constraints:
+    "users_referred_by_fkey" FOREIGN KEY (referred_by) REFERENCES users(id)
+Referenced by:
+    TABLE "battles" CONSTRAINT "battles_player1_id_fkey" FOREIGN KEY (player1_id) REFERENCES users(id)
+    TABLE "battles" CONSTRAINT "battles_player2_id_fkey" FOREIGN KEY (player2_id) REFERENCES users(id)
+    TABLE "battles" CONSTRAINT "battles_winner_id_fkey" FOREIGN KEY (winner_id) REFERENCES users(id)
+    TABLE "daily_engagement_streaks" CONSTRAINT "daily_engagement_streaks_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "gem_transactions" CONSTRAINT "gem_transactions_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "goaltoken_ledger" CONSTRAINT "goaltoken_ledger_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "hall_of_generals" CONSTRAINT "hall_of_generals_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "historical_scenario_results" CONSTRAINT "historical_scenario_results_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "knockout_brackets" CONSTRAINT "knockout_brackets_team1_user_id_fkey" FOREIGN KEY (team1_user_id) REFERENCES users(id)
+    TABLE "knockout_brackets" CONSTRAINT "knockout_brackets_team2_user_id_fkey" FOREIGN KEY (team2_user_id) REFERENCES users(id)
+    TABLE "knockout_brackets" CONSTRAINT "knockout_brackets_winner_user_id_fkey" FOREIGN KEY (winner_user_id) REFERENCES users(id)
+    TABLE "knockout_entries" CONSTRAINT "knockout_entries_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "league_group_members" CONSTRAINT "league_group_members_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "league_participants" CONSTRAINT "league_participants_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "league_pr_log" CONSTRAINT "league_pr_log_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "payments" CONSTRAINT "payments_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "referrals" CONSTRAINT "referrals_recruit_id_fkey" FOREIGN KEY (recruit_id) REFERENCES users(id)
+    TABLE "referrals" CONSTRAINT "referrals_referrer_id_fkey" FOREIGN KEY (referrer_id) REFERENCES users(id)
+    TABLE "tribal_vault_ledger" CONSTRAINT "tribal_vault_ledger_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "tribal_votes" CONSTRAINT "tribal_votes_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "tribe_members" CONSTRAINT "tribe_members_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "user_achievements" CONSTRAINT "user_achievements_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "user_collectibles" CONSTRAINT "user_collectibles_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "user_hall_of_fame" CONSTRAINT "user_hall_of_fame_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "user_iq_profiles" CONSTRAINT "user_iq_profiles_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "user_national_tribes" CONSTRAINT "user_national_tribes_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    TABLE "user_quests" CONSTRAINT "user_quests_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "users" CONSTRAINT "users_referred_by_fkey" FOREIGN KEY (referred_by) REFERENCES users(id)
+    TABLE "wc2026_predictions" CONSTRAINT "wc2026_predictions_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+    TABLE "wc2026_user_stats" CONSTRAINT "wc2026_user_stats_user_id_fkey" FOREIGN KEY (user_id) REFERENCES users(id)
+

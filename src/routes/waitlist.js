@@ -77,6 +77,7 @@ const waitlistRoutes = async (fastify, options) => {
         VALIDATION_ERROR: 400,
         INVALID_TRIBE: 404,
         USER_NOT_FOUND: 404,
+        USERNAME_TAKEN: 409,
       };
       return reply.status(statusMap[result.error] || 500).send({
         success: false,

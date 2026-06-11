@@ -2,6 +2,12 @@ const config = {
   app: {
     port: parseInt(process.env.PORT || '8080'),
     env: process.env.NODE_ENV || 'development',
+    domain: process.env.DOMAIN || 'iqfootballarena.io',
+    allowedOrigins: [
+      'https://iqfootballarena.io',
+      'https://www.iqfootballarena.io',
+      'http://localhost:3000', // Local development
+    ]
   },
   database: {
     host: process.env.DB_HOST || 'localhost',
