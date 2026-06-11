@@ -110,6 +110,18 @@ fastify.get('/health', async (request, reply) => {
   });
 });
 
+fastify.get('/status/health', async (request, reply) => {
+  return reply.send({
+    success: true,
+    data: {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      surgeCohort: 'Centurion Legion',
+      version: '1.2.0'
+    }
+  });
+});
+
 // API routes
 await fastify.register(authRoutes, { prefix: '/auth' });
 await fastify.register(userRoutes, { prefix: '/users' });
