@@ -5,6 +5,7 @@ import { calculateTribePoints, recordTribalBattle, areTribesRivals } from './tri
 import { awardLeaguePoints } from './leagueSystemService.js';
 import { getNationPointsMultiplier } from './surgeService.js';
 import { broadcastTournamentUpdate } from './tournamentLeaderboardService.js';
+import { recordWin as recordGizaWin } from './imperialConflictService.js';
 
 
 // Battle state machine states
@@ -38,6 +39,7 @@ async function getBattleState(battleId, fastify) {
     player1_id: data.player1_id,
     player2_id: data.player2_id,
     status: data.status,
+    sector: data.sector || null,
     player1_score: parseInt(data.player1_score || '0'),
     player2_score: parseInt(data.player2_score || '0'),
     player1_streak: parseInt(data.player1_streak || '0'),
@@ -57,6 +59,7 @@ async function setBattleState(battleId, state, fastify) {
     player1_id: state.player1_id,
     player2_id: state.player2_id,
     status: state.status,
+    sector: state.sector || '',
     player1_score: String(state.player1_score || 0),
     player2_score: String(state.player2_score || 0),
     player1_streak: String(state.player1_streak || 0),
@@ -615,6 +618,7 @@ async function checkRoundComplete(battleId, namespace, fastify) {
 
 // Handle battle end
 async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastify) {
+  const now = new Date();
   let battle = await getBattleState(battleId, fastify);
   
   if (!battle) {
@@ -642,7 +646,8 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
     `SELECT u.id, u.elo, u.battles_played, u.battles_won, u.tribe_id, u.cohort, u.metadata, tm.is_vanguard_100,
             t.slug as tribe_slug,
             (SELECT l.tier FROM league_participants lp JOIN leagues l ON lp.league_id = l.id WHERE lp.user_id = u.id AND l.is_active = true LIMIT 1) as league_tier,
-            EXISTS(SELECT 1 FROM user_achievements WHERE user_id = u.id AND achievement_id = '4b6c8914-87be-47ea-8942-d64e9a8f2765') as has_ares_surge
+            EXISTS(SELECT 1 FROM user_achievements WHERE user_id = u.id AND achievement_id = '770e8400-e29b-41d4-a716-446655440002') as has_ares_surge,
+            EXISTS(SELECT 1 FROM user_achievements WHERE user_id = u.id AND achievement_id = '770e8400-e29b-41d4-a716-446655440003') as has_elite_centurion
      FROM users u
      LEFT JOIN tribe_members tm ON u.id = tm.user_id
      LEFT JOIN tribes t ON u.tribe_id = t.id
@@ -653,7 +658,8 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
     `SELECT u.id, u.elo, u.battles_played, u.battles_won, u.tribe_id, u.cohort, u.metadata, tm.is_vanguard_100,
             t.slug as tribe_slug,
             (SELECT l.tier FROM league_participants lp JOIN leagues l ON lp.league_id = l.id WHERE lp.user_id = u.id AND l.is_active = true LIMIT 1) as league_tier,
-            EXISTS(SELECT 1 FROM user_achievements WHERE user_id = u.id AND achievement_id = '4b6c8914-87be-47ea-8942-d64e9a8f2765') as has_ares_surge
+            EXISTS(SELECT 1 FROM user_achievements WHERE user_id = u.id AND achievement_id = '770e8400-e29b-41d4-a716-446655440002') as has_ares_surge,
+            EXISTS(SELECT 1 FROM user_achievements WHERE user_id = u.id AND achievement_id = '770e8400-e29b-41d4-a716-446655440003') as has_elite_centurion
      FROM users u
      LEFT JOIN tribe_members tm ON u.id = tm.user_id
      LEFT JOIN tribes t ON u.tribe_id = t.id
@@ -745,8 +751,9 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
       // Reward: +50 IQ points for defeating a rival currently in a higher division.
       const isCairoDerby = (p1.tribe_slug === 'al-ahly' && p2.tribe_slug === 'zamalek') ||
                            (p1.tribe_slug === 'zamalek' && p2.tribe_slug === 'al-ahly');
+      const isClashDay = now.getDate() === 8 && now.getMonth() === 5; // June 8
       
-      if (isCairoDerby) {
+      if (isCairoDerby && isClashDay) {
         if (winnerId === player1Id && p2.league_tier && p1.league_tier && p2.league_tier < p1.league_tier) {
           p1EloChange += 50;
         } else if (winnerId === player2Id && p1.league_tier && p2.league_tier && p1.league_tier < p2.league_tier) {
@@ -760,15 +767,47 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
   let p1GemsEarned = (winnerId === player1Id) ? 10 : (winnerId === player2Id ? 2 : 5);
   let p2GemsEarned = (winnerId === player2Id) ? 10 : (winnerId === player1Id ? 2 : 5);
 
-  // --- Golden Lightning Multiplier (Ares Surge Badge) ---
+  // --- Golden Lightning Multiplier (Surge Badges) ---
   if (p1.has_ares_surge) p1GemsEarned = Math.round(p1GemsEarned * 1.2);
   if (p2.has_ares_surge) p2GemsEarned = Math.round(p2GemsEarned * 1.2);
+  
+  if (p1.has_elite_centurion) p1GemsEarned = Math.round(p1GemsEarned * 1.1);
+  if (p2.has_elite_centurion) p2GemsEarned = Math.round(p2GemsEarned * 1.1);
+
+  // --- Casablanca Power Hour (June 6) ---
+  // Reward: 2x GoalToken yield for Moroccan tribes.
+  const isMoroccanSurge = (p1.tribe_slug === 'wydad-casablanca' || p1.tribe_slug === 'raja-casablanca' || 
+                           p2.tribe_slug === 'wydad-casablanca' || p2.tribe_slug === 'raja-casablanca');
+  const isPowerHourDay = now.getDate() === 6 && now.getMonth() === 5; // June 6
+
+  if (isMoroccanSurge && isPowerHourDay) {
+    if (p1.tribe_slug === 'wydad-casablanca' || p1.tribe_slug === 'raja-casablanca') {
+      p1GemsEarned = Math.round(p1GemsEarned * 2.0);
+    }
+    if (p2.tribe_slug === 'wydad-casablanca' || p2.tribe_slug === 'raja-casablanca') {
+      p2GemsEarned = Math.round(p2GemsEarned * 2.0);
+    }
+  }
+
+  // --- Cairo IQ Clash (June 8) ---
+  // Reward: 2x GoalToken yield for Cairo tribes.
+  const isCairoClash = (p1.tribe_slug === 'al-ahly' || p1.tribe_slug === 'zamalek' || 
+                        p2.tribe_slug === 'al-ahly' || p2.tribe_slug === 'zamalek');
+  const isClashDayGems = now.getDate() === 8 && now.getMonth() === 5; // June 8
+
+  if (isCairoClash && isClashDayGems) {
+    if (p1.tribe_slug === 'al-ahly' || p1.tribe_slug === 'zamalek') {
+      p1GemsEarned = Math.round(p1GemsEarned * 2.0);
+    }
+    if (p2.tribe_slug === 'al-ahly' || p2.tribe_slug === 'zamalek') {
+      p2GemsEarned = Math.round(p2GemsEarned * 2.0);
+    }
+  }
 
   // --- Soweto Supremacy Derby Window ---
   // Reward: +10% GoalToken yield for all matches played during the weekend window.
   const isSowetoDerby = (p1.tribe_slug === 'kaizer-chiefs' && p2.tribe_slug === 'orlando-pirates') ||
                         (p1.tribe_slug === 'orlando-pirates' && p2.tribe_slug === 'kaizer-chiefs');
-  const now = new Date();
   const isWeekend = now.getDay() === 0 || now.getDay() === 6; // Sun=0, Sat=6
 
   if (isSowetoDerby && isWeekend) {
@@ -845,6 +884,21 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
   p1NationPoints = Math.round(p1NationPoints * getNationPointsMultiplier(p1.tribe_slug));
   p2NationPoints = Math.round(p2NationPoints * getNationPointsMultiplier(p2.tribe_slug));
 
+  // --- Imperial Conflict: Siege of Giza ---
+  let gizaPPAwarded = 0;
+  if (battle.sector && winnerId) {
+    try {
+      const winnerTribe = winnerId === player1Id ? p1 : p2;
+      const gizaResult = await recordGizaWin(fastify, winnerId, winnerTribe.tribe_id, battle.sector);
+      if (gizaResult) {
+        gizaPPAwarded = gizaResult.pp;
+        fastify.log.info({ battleId, sector: battle.sector, pp: gizaPPAwarded }, 'Imperial Conflict PP awarded');
+      }
+    } catch (e) {
+      fastify.log.error(`Battle ${battleId}: Giza win recording failed: ${e.message}`);
+    }
+  }
+
   // Update battle in database
   await fastify.db.query(
     `UPDATE battles SET 
@@ -857,8 +911,9 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
        tribe_points_awarded = $7,
        winner_tribe_id = $8,
        loser_tribe_id = $9,
+       giza_pp_awarded = $10,
        ended_at = NOW()
-     WHERE id = $10`,
+     WHERE id = $11`,
     [
       isForfeit ? BATTLE_STATES.ABANDONED : BATTLE_STATES.COMPLETED,
       winnerId,
@@ -869,6 +924,7 @@ async function handleBattleEnd(battleId, forfeitBy, isForfeit, namespace, fastif
       tribePointsAwarded,
       winnerTribeId,
       winnerTribeId === p1.tribe_id ? p2.tribe_id : p1.tribe_id,
+      gizaPPAwarded,
       battleId
     ]
   );

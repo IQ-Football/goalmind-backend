@@ -1,7 +1,6 @@
-import pkg from 'pg';
-const { Pool } = pkg;
 import config from './src/config.js';
-
+import pg from 'pg';
+const { Pool } = pg;
 const pool = new Pool({
   host: config.database.host,
   port: config.database.port,
@@ -11,14 +10,16 @@ const pool = new Pool({
 });
 
 async function run() {
+  console.log('--- Migrations Check ---');
+  
   try {
-    const res = await pool.query("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')");
+    const res = await pool.query('SELECT * FROM migrations ORDER BY executed_at DESC LIMIT 5');
     console.log(JSON.stringify(res.rows, null, 2));
-  } catch (err) {
-    console.error(err);
-  } finally {
-    await pool.end();
+  } catch (e) {
+    console.error('Error fetching migrations:', e.message);
   }
+
+  await pool.end();
 }
 
-run();
+run().catch(console.error);

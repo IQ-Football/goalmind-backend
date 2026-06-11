@@ -1,14 +1,5 @@
 import { authenticate, checkAdmin } from '../middleware/auth.js';
-import { 
-  awardBadge, 
-  awardBadgeWithTribeCap, 
-  awardFoundingGeneral, 
-  awardFoundingCenturion,
-  FOUNDING_GENERAL_ID, 
-  FOUNDING_CENTURION_ID,
-  FOUNDING_CAPTAIN_ID, 
-  FOUNDING_THRESHOLD 
-} from '../services/achievementService.js';
+import { awardBadge, awardBadgeWithTribeCap, awardFoundingGeneral, awardFoundingCenturion, awardTribeCommander, FOUNDING_GENERAL_ID, FOUNDING_CAPTAIN_ID, FOUNDING_CENTURION_ID, FOUNDING_THRESHOLD } from '../services/achievementService.js';
 
 const achievementRoutes = async (fastify, options) => {
   // GET /achievements - User's earned badges (requires auth)
@@ -150,7 +141,7 @@ const achievementRoutes = async (fastify, options) => {
 
       if (!result.success) {
         const message = result.reason === 'cap_reached' 
-          ? 'Tribe cap reached for Founding General badge. Use force: true to override.'
+          ? `Tribe cap reached for this badge (${result.count}). Use force: true to override.`
           : 'Failed to award badge.';
         return reply.status(400).send({
           success: false,
@@ -189,49 +180,65 @@ const achievementRoutes = async (fastify, options) => {
   });
 
   // POST /achievements/award/founding-general - Specialized awarding for partner admins (Admin only)
-  // Body: { email, force }
+  // Body: { email, userId, force, signupNumber }
   fastify.post('/award/founding-general', { preHandler: [authenticate, checkAdmin] }, async (request, reply) => {
-    const { email, force = false } = request.body;
-    const achievementId = '550e8400-e29b-41d4-a716-446655440000';
+    const { email, userId: providedUserId, force = false, signupNumber = null } = request.body;
+    const achievementId = FOUNDING_GENERAL_ID;
 
-    if (!email) {
+    if (!email && !providedUserId) {
       return reply.status(400).send({
         success: false,
         error: {
           code: 'BAD_REQUEST',
-          message: 'email is required',
+          message: 'email or userId is required',
           requestId: request.id,
         },
       });
     }
 
     try {
-      // Find user by email
-      const userResult = await fastify.db.query(
-        'SELECT id FROM users WHERE email = $1',
-        [email.toLowerCase()]
-      );
+      let userId = providedUserId;
 
-      if (userResult.rows.length === 0) {
-        return reply.status(404).send({
-          success: false,
-          error: {
-            code: 'NOT_FOUND',
-            message: 'User with this email not found',
-            requestId: request.id,
-          },
-        });
+      if (email) {
+        // Find user by email
+        const userResult = await fastify.db.query(
+          'SELECT id FROM users WHERE email = $1',
+          [email.toLowerCase()]
+        );
+
+        if (userResult.rows.length === 0) {
+          return reply.status(404).send({
+            success: false,
+            error: {
+              code: 'NOT_FOUND',
+              message: 'User with this email not found',
+              requestId: request.id,
+            },
+          });
+        }
+        userId = userResult.rows[0].id;
       }
 
-      const userId = userResult.rows[0].id;
-
       // Award the badge with strict tribe cap (max 10) unless forced
-      const result = await awardFoundingGeneral(fastify, userId, force);
+      const result = await awardFoundingGeneral(fastify, userId, force, signupNumber);
 
       if (!result.success) {
+        if (result.reason === 'already_awarded') {
+          return reply.status(200).send({
+            success: true,
+            data: {
+              message: `User already has Founding General badge (Signup #${result.signupNumber})`,
+              userId,
+              achievementId: FOUNDING_GENERAL_ID,
+              signupNumber: result.signupNumber,
+              alreadyAwarded: true
+            }
+          });
+        }
+
         const message = result.reason === 'cap_reached' 
-          ? 'Tribe cap reached for Founding General badge. Use force: true to override.'
-          : 'Failed to award Founding General badge.';
+          ? `Tribe cap reached for Founding General badge (${result.count}/10). Use force: true to override.`
+          : `Failed to award Founding General badge: ${result.reason}`;
         return reply.status(400).send({
           success: false,
           error: {
@@ -264,87 +271,6 @@ const achievementRoutes = async (fastify, options) => {
         error: {
           code: 'INTERNAL_ERROR',
           message: 'Failed to award Founding General badge',
-          requestId: request.id,
-        },
-      });
-    }
-  });
-
-  // POST /achievements/award/founding-centurion - Specialized awarding for partner admins (Admin only)
-  // Body: { email, force }
-  fastify.post('/award/founding-centurion', { preHandler: [authenticate, checkAdmin] }, async (request, reply) => {
-    const { email, force = false } = request.body;
-
-    if (!email) {
-      return reply.status(400).send({
-        success: false,
-        error: {
-          code: 'BAD_REQUEST',
-          message: 'email is required',
-          requestId: request.id,
-        },
-      });
-    }
-
-    try {
-      // Find user by email
-      const userResult = await fastify.db.query(
-        'SELECT id FROM users WHERE email = $1',
-        [email.toLowerCase()]
-      );
-
-      if (userResult.rows.length === 0) {
-        return reply.status(404).send({
-          success: false,
-          error: {
-            code: 'NOT_FOUND',
-            message: 'User with this email not found',
-            requestId: request.id,
-          },
-        });
-      }
-
-      const userId = userResult.rows[0].id;
-
-      // Award the badge with strict tribe cap (max 100) unless forced
-      const result = await awardFoundingCenturion(fastify, userId, force);
-
-      if (!result.success) {
-        const message = result.reason === 'cap_reached' 
-          ? 'Tribe cap reached for Founding Centurion badge. Use force: true to override.'
-          : 'Failed to award Founding Centurion badge.';
-        return reply.status(400).send({
-          success: false,
-          error: {
-            code: result.reason || 'AWARD_FAILED',
-            message,
-            requestId: request.id,
-          },
-        });
-      }
-
-      fastify.log.info({ admin: request.user.id, userId, email, achievementId: FOUNDING_CENTURION_ID }, 'Founding Centurion badge manually awarded');
-
-      return reply.send({
-        success: true,
-        data: {
-          message: `Founding Centurion badge awarded successfully to ${email}`,
-          userId,
-          achievementId: FOUNDING_CENTURION_ID,
-          signupNumber: result.signupNumber,
-        },
-        meta: {
-          timestamp: new Date().toISOString(),
-          requestId: request.id,
-        },
-      });
-    } catch (err) {
-      fastify.log.error(err);
-      return reply.status(500).send({
-        success: false,
-        error: {
-          code: 'INTERNAL_ERROR',
-          message: 'Failed to award Founding Centurion badge',
           requestId: request.id,
         },
       });
@@ -411,6 +337,61 @@ const achievementRoutes = async (fastify, options) => {
         error: {
           code: 'INTERNAL_ERROR',
           message: 'Failed to award Founding Captain badge',
+          requestId: request.id,
+        },
+      });
+    }
+  });
+
+  // POST /achievements/award/tribe-commander - Manual awarding for tribe leaders (Admin only)
+  // Body: { tribeId }
+  fastify.post('/award/tribe-commander', { preHandler: [authenticate, checkAdmin] }, async (request, reply) => {
+    const { tribeId } = request.body;
+
+    if (!tribeId) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'BAD_REQUEST',
+          message: 'tribeId is required',
+          requestId: request.id,
+        },
+      });
+    }
+
+    try {
+      const result = await awardTribeCommander(fastify, tribeId);
+
+      if (!result.success) {
+        return reply.status(400).send({
+          success: false,
+          error: {
+            code: result.reason || 'AWARD_FAILED',
+            message: 'Failed to award Tribe Commander badge',
+            requestId: request.id,
+          },
+        });
+      }
+
+      return reply.send({
+        success: true,
+        data: {
+          message: 'Tribe Commander badge awarded successfully to leader',
+          leaderId: result.leaderId,
+          tribeId
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+          requestId: request.id,
+        },
+      });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Failed to award Tribe Commander badge',
           requestId: request.id,
         },
       });

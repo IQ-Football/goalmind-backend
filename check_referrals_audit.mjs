@@ -12,8 +12,11 @@ const pool = new Pool({
 
 async function run() {
   try {
-    const res = await pool.query("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')");
-    console.log(JSON.stringify(res.rows, null, 2));
+    const res = await pool.query("SELECT COUNT(*) FROM referrals WHERE created_at >= '2026-05-18'");
+    console.log(`Referrals since May 18: ${res.rows[0].count}`);
+    
+    const latest = await pool.query("SELECT created_at FROM referrals ORDER BY created_at DESC LIMIT 5");
+    console.log("Latest referrals:", JSON.stringify(latest.rows, null, 2));
   } catch (err) {
     console.error(err);
   } finally {

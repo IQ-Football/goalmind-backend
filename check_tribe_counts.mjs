@@ -12,7 +12,8 @@ const pool = new Pool({
 
 async function run() {
   try {
-    const res = await pool.query("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')");
+    const tribes = ['Zamalek SC', 'Enyimba FC', 'Al Ahly', 'Wydad Casablanca', 'Raja Casablanca'];
+    const res = await pool.query("SELECT name, member_count FROM tribes WHERE name = ANY($1)", [tribes]);
     console.log(JSON.stringify(res.rows, null, 2));
   } catch (err) {
     console.error(err);

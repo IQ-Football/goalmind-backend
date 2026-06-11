@@ -12,7 +12,7 @@ const pool = new Pool({
 
 async function run() {
   try {
-    const res = await pool.query("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')");
+    const res = await pool.query("SELECT column_name FROM information_schema.columns WHERE table_name = 'referrals'");
     console.log(JSON.stringify(res.rows, null, 2));
   } catch (err) {
     console.error(err);

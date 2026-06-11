@@ -47,7 +47,7 @@ export function setupMatchmakingHandlers(matchmakingNamespace, fastify) {
     // matchmaking:join - Enter queue
     socket.on('matchmaking:join', async (data) => {
       try {
-        const { elo, tribeId } = data;
+        const { elo, tribeId, sector } = data;
         
         if (!socket.userId) {
           socket.emit('matchmaking:error', {
@@ -86,6 +86,7 @@ export function setupMatchmakingHandlers(matchmakingNamespace, fastify) {
           socketId: socket.id,
           elo,
           tribeId,
+          sector: sector || '',
           joinedAt: Date.now(),
           cohort: cohort || '',
         };
@@ -166,12 +167,15 @@ async function getOpponentSocketId(opponentId, fastify) {
 // Successfully matched two users, finalize the battle
 async function finalizeMatch(userId, opponentId, fastify, namespace) {
   try {
+    // Get sector info from Redis entry for one of the users
+    const sector = await fastify.redis.hget(`matchmaking:entry:${userId}`, 'sector');
+
     // Create battle in database
     const battleId = uuidv4();
     await fastify.db.query(
-      `INSERT INTO battles (id, player1_id, player2_id, status) 
-       VALUES ($1, $2, $3, $4)`,
-      [battleId, userId, opponentId, BATTLE_STATES.PENDING]
+      `INSERT INTO battles (id, player1_id, player2_id, status, sector) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      [battleId, userId, opponentId, BATTLE_STATES.PENDING, sector || null]
     );
 
     // Get opponent info

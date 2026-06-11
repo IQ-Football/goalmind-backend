@@ -1,0 +1,11 @@
+{
+  "users": [
+    {
+      "userNumber": 10001,
+      "email": "testuser_10001@test.com",
+      "userId": "e942ee44-cabb-4b5d-befc-0810ea637f9f",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImU5NDJlZTQ0LWNhYmItNGI1ZC1iZWZjLTA4MTBlYTYzN2Y5ZiIsImVtYWlsIjoidGVzdHVzZXJfMTAwMDFAdGVzdC5jb20iLCJpYXQiOjE3ODAzNDIyMDUsImV4cCI6MTc4MDQyODYwNX0.rPWt6ZS_d1dVgzqtsyKPehaU38WaXEaaBzHeW4kBW5w"
+    }
+  ],
+  "generated": "2026-06-01T19:30:05.227Z"
+}

@@ -8,7 +8,16 @@ import { awardBadge, awardBadgeWithTribeCap, awardBadgeWithGlobalCap, FOUNDING_G
 
 // Referral link prefix (used as deep link base)
 const REFERRAL_PREFIX = 'goalmind://referral';
-const WEB_REFERRAL_BASE = process.env.APP_URL || 'http://34.105.80.179';
+const WEB_REFERRAL_BASE = process.env.APP_URL || 'http://www.goalmind.app';
+
+// Whale Hunter Thresholds
+const SILVER_ORACLE_THRESHOLD = 5000;
+const GOLD_ORACLE_THRESHOLD = 10000;
+const OBSIDIAN_ORACLE_THRESHOLD = 20000;
+
+const SILVER_ORACLE_GT_BONUS = 5000;
+const GOLD_ORACLE_GT_BONUS = 15000;
+const OBSIDIAN_ORACLE_GT_BONUS = 50000;
 
 // Generate unique referral code for a user
 export function generateReferralCode(userId, tribeId) {
@@ -83,10 +92,10 @@ export async function recordReferralAttribution(fastify, { referrerId, recruitId
 
 // Check and award milestone rewards
 export async function checkAndAwardMilestoneRewards(fastify, referrerId, milestone, recruitId = null) {
-  const { referral_count = 0 } = await fastify.db.query(
-    `SELECT referral_count FROM users WHERE id = $1`,
+  const { referral_count = 0, oracle_status = null } = await fastify.db.query(
+    `SELECT referral_count, oracle_status FROM users WHERE id = $1`,
     [referrerId]
-  ).then(r => r.rows[0] || {}).catch(() => ({ referral_count: 0 }));
+  ).then(r => r.rows[0] || {}).catch(() => ({ referral_count: 0, oracle_status: null }));
   
   const rewards = [];
   
@@ -247,6 +256,58 @@ export async function checkAndAwardMilestoneRewards(fastify, referrerId, milesto
       [referrerId]
     );
   }
+
+  // Whale Hunter Tiers (5,000, 10,000, 20,000 referrals)
+  
+  // Milestone 6: Silver Oracle (5,000 referrals)
+  if (referral_count >= 5000 && oracle_status !== 'silver' && oracle_status !== 'gold' && oracle_status !== 'obsidian') {
+    rewards.push({ type: 'oracle_status', status: 'silver', label: 'Silver Oracle status' });
+    await fastify.db.query(
+      `UPDATE users SET oracle_status = 'silver', goal_tokens = COALESCE(goal_tokens, 0) + 5000 WHERE id = $1`,
+      [referrerId]
+    );
+    // Award Silver Oracle badge
+    await fastify.db.query(
+      `INSERT INTO user_badges (user_id, badge_id, awarded_at) 
+       SELECT $1, id, NOW() FROM badges WHERE slug = 'silver_oracle' AND NOT EXISTS (SELECT 1 FROM user_badges WHERE user_id = $1 AND badge_id = (SELECT id FROM badges WHERE slug = 'silver_oracle'))`,
+      [referrerId]
+    );
+  }
+
+  // Milestone 7: Gold Oracle (10,000 referrals)
+  if (referral_count >= 10000 && oracle_status !== 'gold' && oracle_status !== 'obsidian') {
+    rewards.push({ type: 'oracle_status', status: 'gold', label: 'Gold Oracle status' });
+    await fastify.db.query(
+      `UPDATE users SET oracle_status = 'gold', goal_tokens = COALESCE(goal_tokens, 0) + 15000 WHERE id = $1`,
+      [referrerId]
+    );
+    // Award Gold Oracle badge
+    await fastify.db.query(
+      `INSERT INTO user_badges (user_id, badge_id, awarded_at) 
+       SELECT $1, id, NOW() FROM badges WHERE slug = 'gold_oracle' AND NOT EXISTS (SELECT 1 FROM user_badges WHERE user_id = $1 AND badge_id = (SELECT id FROM badges WHERE slug = 'gold_oracle'))`,
+      [referrerId]
+    );
+  }
+
+  // Milestone 8: Obsidian Oracle (20,000 referrals)
+  if (referral_count >= 20000 && oracle_status !== 'obsidian') {
+    rewards.push({ type: 'oracle_status', status: 'obsidian', label: 'Obsidian Oracle status' });
+    await fastify.db.query(
+      `UPDATE users SET oracle_status = 'obsidian', goal_tokens = COALESCE(goal_tokens, 0) + 50000 WHERE id = $1`,
+      [referrerId]
+    );
+    // Award Obsidian Oracle badge and Herald's Horn
+    await fastify.db.query(
+      `INSERT INTO user_badges (user_id, badge_id, awarded_at) 
+       SELECT $1, id, NOW() FROM badges WHERE slug = 'obsidian_oracle' AND NOT EXISTS (SELECT 1 FROM user_badges WHERE user_id = $1 AND badge_id = (SELECT id FROM badges WHERE slug = 'obsidian_oracle'))`,
+      [referrerId]
+    );
+    await fastify.db.query(
+      `INSERT INTO user_badges (user_id, badge_id, awarded_at) 
+       SELECT $1, id, NOW() FROM badges WHERE slug = 'herald_horn' AND NOT EXISTS (SELECT 1 FROM user_badges WHERE user_id = $1 AND badge_id = (SELECT id FROM badges WHERE slug = 'herald_horn'))`,
+      [referrerId]
+    );
+  }
   
   if (rewards.length > 0) {
     fastify.log.info({ referrerId, milestone, rewards }, 'Milestone rewards awarded');
@@ -289,7 +350,7 @@ export async function getTopRecruiters(fastify, { limit = 10, tribeId = null } =
 // Get user's referral stats
 export async function getUserReferralStats(fastify, userId) {
   const user = await fastify.db.query(
-    `SELECT referral_count, nation_points, title FROM users WHERE id = $1`,
+    `SELECT referral_count, nation_points, title, oracle_status FROM users WHERE id = $1`,
     [userId]
   ).then(r => r.rows[0]);
   
@@ -309,14 +370,20 @@ export async function getUserReferralStats(fastify, userId) {
     nextReward: count < 5 ? 'Reach 5 recruits for Founding Recruiter' : 
                 count < 10 ? 'Reach 10 recruits for Tribe General' : 
                 count < 25 ? 'Reach 25 recruits for National Hero' : 
-                count < 50 ? 'Reach 50 recruits for Founding General' : 'Max level reached',
+                count < 50 ? 'Reach 50 recruits for Founding General' : 
+                count < 5000 ? 'Reach 5,000 recruits for Silver Oracle' :
+                count < 10000 ? 'Reach 10,000 recruits for Gold Oracle' :
+                count < 20000 ? 'Reach 20,000 recruits for Obsidian Oracle' : 'Max Oracle status reached',
     foundingRecruiterProgress: Math.min(100, (count / 5) * 100),
     tribeGeneralProgress: Math.min(100, (count / 10) * 100),
     nationalHeroProgress: Math.min(100, (count / 25) * 100),
     foundingGeneralProgress: Math.min(100, (count / 50) * 100),
-    foundingCaptainProgress: Math.min(100, (count / 50) * 100),
+    silverOracleProgress: Math.min(100, (count / 5000) * 100),
+    goldOracleProgress: Math.min(100, (count / 10000) * 100),
+    obsidianOracleProgress: Math.min(100, (count / 20000) * 100),
     currentTitle: user?.title || null,
     nationPoints: user?.nation_points || 0,
+    oracleStatus: user?.oracle_status || null,
   };
   
   return {

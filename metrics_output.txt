@@ -1,0 +1,62 @@
+Total Signups: 25092
+Tribe Columns: [
+  'id',
+  'name',
+  'type',
+  'slug',
+  'logo_url',
+  'primary_color',
+  'secondary_color',
+  'rival_tribe_ids',
+  'total_points',
+  'member_count',
+  'created_at',
+  'waitlist_signups',
+  'avg_fan_iq',
+  'daily_engagement_points',
+  'region',
+  'is_super_tribe',
+  'is_national_tribe',
+  'banner_url',
+  'motto',
+  'zero_broken_at',
+  'anthem_url',
+  'seasonal_skin_enabled'
+]
+Breakdown by Country: [
+  { country: 'Other', count: '8280' },
+  { country: 'North Africa', count: '5353' },
+  { country: 'Southern Africa', count: '3163' },
+  { country: 'Africa', count: '2040' },
+  { country: 'East Africa', count: '1724' },
+  { country: 'Europe', count: '1184' },
+  { country: 'Asia', count: '873' },
+  { country: 'Nigeria', count: '851' },
+  { country: 'West Africa', count: '608' },
+  { country: 'South America', count: '559' },
+  { country: 'North America', count: '338' },
+  { country: 'Central Africa', count: '115' }
+]
+Top 5 Tribes by Power Points: [
+  { name: 'Al Ahly', slug: 'al-ahly', power_score: '1375.000' },
+  {
+    name: 'Wydad Casablanca',
+    slug: 'wydad-casablanca',
+    power_score: '970.000'
+  },
+  {
+    name: 'Raja Casablanca',
+    slug: 'raja-casablanca',
+    power_score: '877.000'
+  },
+  {
+    name: 'Young Africans SC',
+    slug: 'yanga-sc',
+    power_score: '871.000'
+  },
+  {
+    name: 'Orlando Pirates',
+    slug: 'orlando-pirates',
+    power_score: '864.000'
+  }
+]

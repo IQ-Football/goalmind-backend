@@ -116,14 +116,18 @@ export async function registerWaitlistSignup(fastify, { name, email, tribeId, re
     // Create user (username defaults to part of email if name not provided)
     const defaultUsername = name ? name.trim() : email.split('@')[0];
     
-    // Determine cohort (first 500: Vanguard 500, next 500: Centurion)
+    // Determine cohort based on global signup count
     const countRes = await fastify.db.query('SELECT COUNT(*) FROM users');
     const totalUsers = parseInt(countRes.rows[0].count);
-    let cohort = null;
+    let cohort = 'standard';
     if (totalUsers < 500) {
       cohort = 'vanguard_500';
-    } else if (totalUsers < 1000) {
-      cohort = 'centurion';
+    } else if (totalUsers < 25000) {
+      cohort = 'founding_centurion';
+    } else if (totalUsers < 30000) {
+      cohort = 'ares_surge';
+    } else if (totalUsers < 50000) {
+      cohort = 'elite_centurion';
     }
 
     const userResult = await fastify.db.query(
@@ -299,14 +303,18 @@ export async function getWaitlistCount(fastify, { byTribe = false } = {}) {
       const counts = {
         total: parseInt(countResult.rows[0].total),
         vanguard_500: 0,
-        centurion: 0,
+        founding_centurion: 0,
+        ares_surge: 0,
+        elite_centurion: 0,
         standard: 0
       };
 
       cohortResult.rows.forEach(row => {
-        if (row.cohort === 'vanguard_500') counts.vanguard_500 = parseInt(row.count);
-        else if (row.cohort === 'centurion') counts.centurion = parseInt(row.count);
-        else counts.standard += parseInt(row.count);
+        if (row.cohort in counts) {
+          counts[row.cohort] = parseInt(row.count);
+        } else {
+          counts.standard += parseInt(row.count);
+        }
       });
 
       return {
@@ -320,7 +328,9 @@ export async function getWaitlistCount(fastify, { byTribe = false } = {}) {
       `SELECT t.id as tribe_id, t.name, t.slug, 
               COUNT(u.id)::int as signups,
               COUNT(CASE WHEN u.cohort = 'vanguard_500' THEN 1 END)::int as vanguard_500,
-              COUNT(CASE WHEN u.cohort = 'centurion' THEN 1 END)::int as centurion
+              COUNT(CASE WHEN u.cohort = 'founding_centurion' THEN 1 END)::int as founding_centurion,
+              COUNT(CASE WHEN u.cohort = 'ares_surge' THEN 1 END)::int as ares_surge,
+              COUNT(CASE WHEN u.cohort = 'elite_centurion' THEN 1 END)::int as elite_centurion
        FROM tribes t
        LEFT JOIN users u ON u.tribe_id = t.id
        GROUP BY t.id, t.name, t.slug
@@ -339,7 +349,9 @@ export async function getWaitlistCount(fastify, { byTribe = false } = {}) {
           slug: r.slug,
           signups: r.signups,
           vanguard_500: r.vanguard_500,
-          centurion: r.centurion,
+          founding_centurion: r.founding_centurion,
+          ares_surge: r.ares_surge,
+          elite_centurion: r.elite_centurion,
         })),
       },
     };

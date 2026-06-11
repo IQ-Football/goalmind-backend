@@ -78,13 +78,17 @@ const authRoutes = async (fastify, options) => {
         }
       }
 
-      // Determine cohort (first 500: Vanguard 500, next 500: Centurion)
+      // Determine cohort based on global signup count
       const usersTotalCount = await fastify.redis.incr('users:total_count');
-      let cohort = null;
+      let cohort = 'standard';
       if (usersTotalCount <= 500) {
         cohort = 'vanguard_500';
-      } else if (usersTotalCount <= 1000) {
-        cohort = 'centurion';
+      } else if (usersTotalCount <= 25000) {
+        cohort = 'founding_centurion';
+      } else if (usersTotalCount <= 30000) {
+        cohort = 'ares_surge';
+      } else if (usersTotalCount <= 50000) {
+        cohort = 'elite_centurion';
       }
 
       // Execute database operations in a transaction for consistency

@@ -1,7 +1,7 @@
 import axios from 'axios';
 import { v4 as uuidv4 } from 'uuid';
 
-const BASE_URL = 'http://localhost:8082';
+const BASE_URL = 'http://localhost:8080';
 const TOTAL_SIGNUPS = 1000;
 const CONCURRENCY = 50;
 

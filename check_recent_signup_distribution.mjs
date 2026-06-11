@@ -12,7 +12,14 @@ const pool = new Pool({
 
 async function run() {
   try {
-    const res = await pool.query("SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema')");
+    const res = await pool.query(`
+      SELECT t.name, COUNT(u.id) as recent_signups
+      FROM users u
+      JOIN tribes t ON u.tribe_id = t.id
+      WHERE u.created_at >= '2026-06-05'
+      GROUP BY t.name
+      ORDER BY recent_signups DESC
+    `);
     console.log(JSON.stringify(res.rows, null, 2));
   } catch (err) {
     console.error(err);

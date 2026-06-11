@@ -21,18 +21,19 @@ const THRESHOLD = 10;
 /**
  * Award the badge using the service layer
  */
-async function awardToUserWithCap(userId, email, force = false) {
+async function awardToUserWithCap(userId, email, force = false, signupNumber = null) {
   try {
-    const result = await awardFoundingGeneral(fastify, userId, force);
+    const result = await awardFoundingGeneral(fastify, userId, force, signupNumber);
     
     if (result.success) {
-      if (result.message === 'already_awarded') {
-        console.log(`ℹ️ User ${email || userId} already has the Founding General badge.`);
-        return false;
-      }
       console.log(`✅ Successfully awarded Founding General to ${email || userId}${force ? ' (FORCED)' : ''} - Signup #${result.signupNumber}`);
       return true;
     } else {
+      if (result.reason === 'already_awarded') {
+        console.log(`ℹ️ User ${email || userId} already has the Founding General badge (Signup #${result.signupNumber}).`);
+        return false;
+      }
+      
       if (result.reason === 'cap_reached') {
         console.warn(`⚠️ Tribe cap reached (${result.count}/10) for ${email || userId}'s tribe. Awarding 'Founding Captain' instead? (Use --captain)`);
         console.log(`ℹ️ Use --force to override cap.`);
@@ -66,9 +67,11 @@ async function awardCaptain(userId, email) {
 async function syncTribe(tribeId, tribeName) {
   console.log(`\nSyncing tribe: ${tribeName} (${tribeId})...`);
   const users = await pool.query(
-    `SELECT id, email, created_at FROM users 
-     WHERE tribe_id = $1 
-     ORDER BY created_at ASC 
+    `SELECT u.id, u.email, COALESCE(tm.joined_at, u.created_at) as joined_at 
+     FROM users u
+     LEFT JOIN tribe_members tm ON u.id = tm.user_id
+     WHERE u.tribe_id = $1 
+     ORDER BY joined_at ASC 
      LIMIT $2`,
     [tribeId, THRESHOLD]
   );
@@ -85,7 +88,15 @@ async function syncTribe(tribeId, tribeName) {
 async function run() {
   const args = process.argv.slice(2);
   const force = args.includes('--force');
-  const filteredArgs = args.filter(a => a !== '--force');
+  
+  // Extract --number <val>
+  let signupNumber = null;
+  const numIndex = args.indexOf('--number');
+  if (numIndex !== -1 && args[numIndex + 1]) {
+    signupNumber = parseInt(args[numIndex + 1]);
+  }
+
+  const filteredArgs = args.filter(a => a !== '--force' && a !== '--number' && a !== String(signupNumber));
   const mode = filteredArgs[0];
   const value = filteredArgs[1];
 
@@ -95,14 +106,14 @@ async function run() {
       if (userRes.rows.length === 0) {
         console.error('User not found.');
       } else {
-        await awardToUserWithCap(userRes.rows[0].id, value, force);
+        await awardToUserWithCap(userRes.rows[0].id, value, force, signupNumber);
       }
     } else if (mode === '--user' && value) {
       const userRes = await pool.query('SELECT id, email FROM users WHERE id = $1', [value]);
       if (userRes.rows.length === 0) {
         console.error('User not found.');
       } else {
-        await awardToUserWithCap(userRes.rows[0].id, userRes.rows[0].email, force);
+        await awardToUserWithCap(userRes.rows[0].id, userRes.rows[0].email, force, signupNumber);
       }
     } else if (mode === '--captain' && value) {
         const userRes = await pool.query('SELECT id, email FROM users WHERE email = $1 OR id::text = $1', [value.toLowerCase()]);
@@ -142,8 +153,8 @@ async function run() {
       }
     } else {
       console.log('Usage:');
-      console.log('  node manual_award_founding_general.mjs --email <email> [--force]');
-      console.log('  node manual_award_founding_general.mjs --user <userId> [--force]');
+      console.log('  node manual_award_founding_general.mjs --email <email> [--force] [--number <val>]');
+      console.log('  node manual_award_founding_general.mjs --user <userId> [--force] [--number <val>]');
       console.log('  node manual_award_founding_general.mjs --captain <email_or_userId>');
       console.log('  node manual_award_founding_general.mjs --tribe <tribe_id_or_slug>');
       console.log('  node manual_award_founding_general.mjs --surge');

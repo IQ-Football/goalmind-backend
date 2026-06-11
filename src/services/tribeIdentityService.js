@@ -1,4 +1,14 @@
-import { hasAchievement, awardFoundingGeneral, awardFoundingCenturion, FOUNDING_CAPTAIN_ID, FOUNDING_GENERAL_ID, FOUNDING_CENTURION_ID } from './achievementService.js';
+import { 
+  hasAchievement, 
+  awardFoundingGeneral, 
+  awardFoundingCenturion, 
+  awardBadge,
+  FOUNDING_CAPTAIN_ID, 
+  FOUNDING_GENERAL_ID, 
+  FOUNDING_CENTURION_ID,
+  ARES_SURGE_ID,
+  ELITE_CENTURION_ID
+} from './achievementService.js';
 
 /**
  * Fetch tribal visual configuration.
@@ -154,7 +164,19 @@ export async function processTribalCatchup(fastify, { userId, tribeId }) {
       fastify.log.info({ userId, tribeId }, 'Vanguard 100 rewards awarded');
     }
 
-    // 3. Deadlock Breaker Badge logic (Check if 50th signup within 72h)
+    // 3. Global Cohort Rewards (Ares & Elite Centurion)
+    const userRes = await fastify.db.query('SELECT cohort FROM users WHERE id = $1', [userId]);
+    const cohort = userRes.rows[0]?.cohort;
+
+    if (cohort === 'ares_surge') {
+      await awardBadge(fastify, userId, ARES_SURGE_ID);
+      fastify.log.info({ userId }, 'Ares Surge badge awarded automatically');
+    } else if (cohort === 'elite_centurion') {
+      await awardBadge(fastify, userId, ELITE_CENTURION_ID);
+      fastify.log.info({ userId }, 'Elite Centurion badge awarded automatically');
+    }
+
+    // 4. Deadlock Breaker Badge logic (Check if 50th signup within 72h)
     if (tribeInfo.member_count === 50 && tribeInfo.zero_broken_at) {
       const seventyTwoHoursAgo = new Date(Date.now() - 72 * 60 * 60 * 1000);
       if (new Date(tribeInfo.zero_broken_at) > seventyTwoHoursAgo) {

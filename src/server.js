@@ -32,6 +32,7 @@ import relayRoutes from './routes/relay.js';
 import shopRoutes from './routes/shop.js';
 import continentalCupRoutes from './routes/continentalCup.js';
 import onboardingRoutes from './routes/onboarding.js';
+import imperialConflictRoutes from './routes/imperialConflict.js';
 import { setupBattleHandlers } from './services/battleService.js';
 import { setupRelayHandlers } from './services/relayService.js';
 import { setupTournamentHandlers } from './services/tournamentLeaderboardService.js';
@@ -83,6 +84,11 @@ fastify.register(dbMonitorPlugin);
 // Initialize Redis connection
 fastify.register(redisPlugin);
 
+// Root route
+fastify.get('/', async (request, reply) => {
+  return { name: 'GoalMind API', version: '1.0.0', status: 'active' };
+});
+
 // Health check
 fastify.get('/health', async (request, reply) => {
   return { status: 'ok', timestamp: new Date().toISOString() };
@@ -114,6 +120,7 @@ await fastify.register(shopRoutes, { prefix: '/shop' });
 await fastify.register(shopRoutes, { prefix: '/payments' });
 await fastify.register(continentalCupRoutes, { prefix: '/continental-cup' });
 await fastify.register(onboardingRoutes, { prefix: '/onboarding' });
+await fastify.register(imperialConflictRoutes, { prefix: '/imperial-conflict' });
 
 // Socket.IO setup for real-time battles
 const io = new Server(fastify.server, {
