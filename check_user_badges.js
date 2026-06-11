@@ -7,9 +7,9 @@ const pool = new Pool({
   user: 'postgres',
   password: 'postgres',
 });
-async function check() {
+async function check(userId) {
   try {
-    const res = await pool.query("SELECT * FROM achievements WHERE id = '550e8400-e29b-41d4-a716-446655440000'");
+    const res = await pool.query("SELECT * FROM user_achievements WHERE user_id = $1", [userId]);
     console.log(JSON.stringify(res.rows, null, 2));
   } catch (err) {
     console.error(err);
@@ -17,4 +17,9 @@ async function check() {
     await pool.end();
   }
 }
-check();
+const userId = process.argv[2];
+if (!userId) {
+  console.error("Usage: node check_user_badges.js <userId>");
+  process.exit(1);
+}
+check(userId);

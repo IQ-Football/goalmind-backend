@@ -1,4 +1,5 @@
 import config from '../config.js';
+import { getDerbyMultipliers } from './derbyService.js';
 
 /**
  * Tribe War Scoring Service
@@ -100,7 +101,9 @@ export async function recordTribalBattle(fastify, battleData) {
       basePoints = 30; // 3x Tribe Points
     }
 
-    const pointsAwarded = basePoints * multiplier;
+    // Apply Derby Window Tribe Honor multipliers
+    const derbyMultipliers = await getDerbyMultipliers(fastify, winnerTribeId);
+    const pointsAwarded = Math.floor(basePoints * multiplier * derbyMultipliers.tribe_honor);
 
     // Update Redis scoring
     if (winnerTribeId) {

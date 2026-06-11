@@ -11,10 +11,46 @@ import {
   recordTribalBattle,
 } from '../services/tribeWarScoring.js';
 import { getTribeWarLeaderboard, getTribeRivalries } from '../services/tribeWarService.js';
+import { getActiveDerbyWindows, getDerbyMultipliers } from '../services/derbyService.js';
 
 const tribeWarRoutes = async (fastify, options) => {
   // All routes require authentication
   fastify.addHook('preHandler', authenticate);
+
+  // GET /tribe-wars/derby-windows - Get active derby windows and multipliers
+  fastify.get('/derby-windows', async (request, reply) => {
+    try {
+      const userId = request.user.id;
+      const userResult = await fastify.db.query('SELECT tribe_id FROM users WHERE id = $1', [userId]);
+      const tribeId = userResult.rows[0]?.tribe_id;
+
+      const activeWindows = await getActiveDerbyWindows(fastify, tribeId);
+      const multipliers = await getDerbyMultipliers(fastify, tribeId);
+
+      return reply.send({
+        success: true,
+        data: {
+          activeWindows,
+          multipliers,
+          tribeId
+        },
+        meta: {
+          timestamp: new Date().toISOString(),
+          requestId: request.id,
+        },
+      });
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({
+        success: false,
+        error: {
+          code: 'INTERNAL_ERROR',
+          message: 'Failed to fetch derby windows',
+          requestId: request.id,
+        },
+      });
+    }
+  });
 
   // GET /tribe-wars/leaderboard - Rivalry battles won leaderboard
   fastify.get('/leaderboard', async (request, reply) => {

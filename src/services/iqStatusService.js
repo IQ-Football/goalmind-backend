@@ -77,9 +77,10 @@ export async function computeIQProfile(fastify, userId) {
     `SELECT u.id, u.username, u.email, u.elo, u.battles_played, u.battles_won,
             u.nation_points, u.title, u.streak_days, u.status,
             u.contribution_points, u.decay_immunity_days, u.cohort,
+            u.prestige_stars,
             t.name as tribe_name, t.slug as tribe_slug, t.type as tribe_type,
-
             (SELECT MAX(member_count) FROM tribes) as max_tribe_member_count,
+            (SELECT member_count FROM tribes WHERE id = u.tribe_id) as tribe_member_count,
             u.created_at as joined_at,
             tm.is_vanguard_100, tm.is_zero_breaker, tm.is_founding_general, tm.metadata as tm_metadata
             FROM users u
@@ -87,38 +88,54 @@ export async function computeIQProfile(fastify, userId) {
             LEFT JOIN tribe_members tm ON u.id = tm.user_id
             WHERE u.id = $1`,
             [userId]
-            );
-            if (userResult.rows.length === 0) return null;
-            const user = userResult.rows[0];
-            const tmMetadata = user.tm_metadata || {};
-            const fgBadge = tmMetadata.badges?.founding_general || {};
+  );
+  if (userResult.rows.length === 0) return null;
+  const user = userResult.rows[0];
+  const tmMetadata = user.tm_metadata || {};
+  const fgBadge = tmMetadata.badges?.founding_general || {};
 
-            // Determine tier from ELO (10-tier)
+  // Determine tier from ELO (10-tier)
   const tier = getTierForElo(user.elo);
 
-  // Global rank from Redis
-  const globalRank = await fastify.redis.zrevrank('leaderboard:global', userId);
-  const totalUsers = await fastify.redis.zcard('leaderboard:global');
+  // Optimized Redis calls using pipeline
+  const pipeline = fastify.redis.pipeline();
+  pipeline.zrevrank('leaderboard:global', userId);
+  pipeline.zcard('leaderboard:global');
+  
+  if (user.tribe_type === 'club' && user.tribe_slug) {
+    pipeline.zrevrank(`national:${user.tribe_slug}`, userId);
+    pipeline.zcard(`national:${user.tribe_slug}`);
+  }
+  
+  if (user.tribe_id) {
+    pipeline.zrevrank(`tribe:${user.tribe_id}`, userId);
+  }
+  
+  const redisResults = await pipeline.exec();
+  
+  let resultIdx = 0;
+  const globalRank = redisResults[resultIdx++][1];
+  const totalUsers = redisResults[resultIdx++][1];
+  
+  let nationalRank = null;
+  let nationalTotal = 0;
+  if (user.tribe_type === 'club' && user.tribe_slug) {
+    nationalRank = redisResults[resultIdx++][1];
+    nationalTotal = redisResults[resultIdx++][1];
+  }
+  
+  let tribalRank = null;
+  if (user.tribe_id) {
+    tribalRank = redisResults[resultIdx++][1];
+  }
+
   const globalPercentile = globalRank !== null && totalUsers > 0
     ? Number(((totalUsers - globalRank - 1) / totalUsers * 100).toFixed(2))
     : null;
 
-  // National percentile (if national tribe)
-  let nationalRank = null;
-  let nationalPercentile = null;
-  if (user.tribe_type === 'club' && user.tribe_slug) {
-    nationalRank = await fastify.redis.zrevrank(`national:${user.tribe_slug}`, userId);
-    const nationalTotal = await fastify.redis.zcard(`national:${user.tribe_slug}`);
-    nationalPercentile = nationalRank !== null && nationalTotal > 0
-      ? Number(((nationalTotal - nationalRank - 1) / nationalTotal * 100).toFixed(2))
-      : null;
-  }
-
-  // Tribal rank
-  let tribalRank = null;
-  if (user.tribe_id) {
-    tribalRank = await fastify.redis.zrevrank(`tribe:${user.tribe_id}`, userId);
-  }
+  const nationalPercentile = nationalRank !== null && nationalTotal > 0
+    ? Number(((nationalTotal - nationalRank - 1) / nationalTotal * 100).toFixed(2))
+    : null;
 
   // Quiz stats
   const quizResult = await fastify.db.query(
@@ -132,7 +149,7 @@ export async function computeIQProfile(fastify, userId) {
   const { quiz_count, correct_count, avg_response_time } = quizResult.rows[0];
   const accuracyRate = quiz_count > 0 ? Number(((correct_count || 0) / quiz_count * 100).toFixed(2)) : 0;
 
-  // CP-based Tribal Seniority (contribution_points column required)
+  // CP-based Tribal Seniority
   const contributionPoints = Number(user.contribution_points) || 0;
   const tribalSeniority = getTribalSeniority(contributionPoints);
 
@@ -285,27 +302,35 @@ const MASTERY_CATEGORIES = [
 export async function awardCategoryBadges(fastify, userId) {
   const awarded = [];
   
+  // 1. Fetch all existing mastery badges for the user in one query
+  const existingBadgesResult = await fastify.db.query(
+    `SELECT a.slug FROM user_achievements ua
+     JOIN achievements a ON ua.achievement_id = a.id
+     WHERE ua.user_id = $1 AND a.slug = ANY($2)`,
+    [userId, MASTERY_CATEGORIES.map(c => c.badge)]
+  );
+  const existingSlugs = new Set(existingBadgesResult.rows.map(r => r.slug));
+
+  // 2. Fetch battle round stats grouped by category in one query
+  const statsResult = await fastify.db.query(
+    `SELECT q.category, COUNT(*) as total,
+            SUM(CASE WHEN br.is_correct THEN 1 ELSE 0 END) as correct
+     FROM battle_rounds br
+     JOIN questions q ON br.question_id = q.id
+     WHERE br.user_id = $1
+     GROUP BY q.category`,
+    [userId]
+  );
+  const categoryStats = new Map(statsResult.rows.map(r => [r.category, r]));
+
+  // 3. Process and award badges
   for (const { category, badge, threshold, minQuizzes } of MASTERY_CATEGORIES) {
-    const existing = await fastify.db.query(
-      `SELECT 1 FROM user_achievements ua
-       JOIN achievements a ON ua.achievement_id = a.id
-       WHERE ua.user_id = $1 AND a.slug = $2`,
-      [userId, badge]
-    );
-    if (existing.rows.length > 0) continue;
+    if (existingSlugs.has(badge)) continue;
 
-    const catResult = await fastify.db.query(
-      `SELECT COUNT(*) as total,
-              SUM(CASE WHEN br.is_correct THEN 1 ELSE 0 END) as correct
-       FROM battle_rounds br
-       JOIN questions q ON br.question_id = q.id
-       WHERE br.user_id = $1 AND q.category = $2`,
-      [userId, category]
-    );
-    const { total, correct } = catResult.rows[0];
-    if (Number(total) < minQuizzes) continue;
+    const stats = categoryStats.get(category);
+    if (!stats || Number(stats.total) < minQuizzes) continue;
 
-    const accuracy = Number(correct) / Number(total);
+    const accuracy = Number(stats.correct) / Number(stats.total);
     if (accuracy >= threshold) {
       const achResult = await fastify.db.query(
         'SELECT id FROM achievements WHERE slug = $1',

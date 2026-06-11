@@ -24,11 +24,12 @@ async function run() {
       
       // Get users in this tribe with the FG badge, ordered by earned_at
       const usersRes = await pool.query(`
-        SELECT ua.user_id, ua.earned_at
+        SELECT ua.user_id, COALESCE(tm.joined_at, u.created_at) as joined_at
         FROM user_achievements ua
         JOIN users u ON ua.user_id = u.id
+        LEFT JOIN tribe_members tm ON u.id = tm.user_id
         WHERE ua.achievement_id = $1 AND u.tribe_id = $2
-        ORDER BY ua.earned_at ASC
+        ORDER BY joined_at ASC, u.created_at ASC
       `, [FOUNDING_GENERAL_ID, tribe.id]);
 
       const users = usersRes.rows;

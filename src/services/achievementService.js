@@ -4,57 +4,42 @@
  */
 
 const FOUNDING_GENERAL_ID = '550e8400-e29b-41d4-a716-446655440000';
-const FOUNDING_CENTURION_ID = '660e8400-e29b-41d4-a716-446655440001';
 const FOUNDING_PRO_ID = '550e8400-e29b-41d4-a716-446655440001';
 const FOUNDING_RECRUITER_ID = '550e8400-e29b-41d4-a716-446655440002';
 const FOUNDING_CAPTAIN_ID = '550e8400-e29b-41d4-a716-446655440003';
 const ARES_SURGE_ID = '4b6c8914-87be-47ea-8942-d64e9a8f2765';
-const SURGE_25K_ID = '770e8400-e29b-41d4-a716-446655440001';
+const FOUNDING_CENTURION_ID = '660e8400-e29b-41d4-a716-446655440001';
 const ETERNAL_TITAN_ID = '550e8400-e29b-41d4-a716-446655440007';
+const SURGE_25K_ID = '770e8400-e29b-41d4-a716-446655440001';
+const SURGE_50K_ID = '770e8400-e29b-41d4-a716-446655440003';
+const EKO_VANGUARD_ID = '770e8400-e29b-41d4-a716-446655440005';
+const TRIBE_COMMANDER_ID = '550e8400-e29b-41d4-a716-446655440005';
+const SEERS_EYE_BADGE_ID = '880e8400-e29b-41d4-a716-446655440001';
+
 const FOUNDING_THRESHOLD = 10;
 const CENTURION_THRESHOLD = 100;
-const SURGE_25K_THRESHOLD = 25000;
-const SURGE_25K_START = 23388;
+const COMMANDER_THRESHOLD = 1000;
 
-/**
- * Award the 25k Surge badge to a user if they are within the cohort
- */
-export async function checkAndAward25kSurgeBadge(fastify, userId) {
-  try {
-    const countRes = await fastify.db.query('SELECT COUNT(*) FROM users');
-    const totalUsers = parseInt(countRes.rows[0].count);
+const SILVER_ORACLE_THRESHOLD = 5000;
+const GOLD_ORACLE_THRESHOLD = 10000;
+const OBSIDIAN_ORACLE_THRESHOLD = 20000;
 
-    if (totalUsers >= SURGE_25K_START && totalUsers < SURGE_25K_THRESHOLD) {
-      await awardBadge(fastify, userId, SURGE_25K_ID);
-      
-      // Update metadata
-      const badgeData = {
-        asset: '/assets/badges/25k_surge.png',
-        name: '25k Surge',
-        flair_name: 'Elite Sprint'
-      };
-
-      await fastify.db.query(`
-        UPDATE users
-        SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(metadata->'badges', '{}'::jsonb) || jsonb_build_object('surge_25k', $1::jsonb))
-        WHERE id = $2
-      `, [JSON.stringify(badgeData), userId]);
-
-      return true;
-    }
-    return false;
-  } catch (err) {
-    fastify.log.error({ err, userId }, 'Error awarding 25k Surge badge');
-    throw err;
-  }
-}
+const SURGE_25K_MIN = 23388;
+const SURGE_25K_MAX = 25000;
 
 /**
  * Award a specific badge to a user
  */
 export async function awardBadge(fastify, userId, achievementId) {
+  return awardBadgeWithClient(fastify.db, userId, achievementId, fastify.log);
+}
+
+/**
+ * Internal version that takes a DB client (useful for transactions)
+ */
+export async function awardBadgeWithClient(client, userId, achievementId, logger = console) {
   try {
-    const result = await fastify.db.query(
+    const result = await client.query(
       `INSERT INTO user_achievements (user_id, achievement_id, earned_at)
        VALUES ($1, $2, NOW())
        ON CONFLICT (user_id, achievement_id) DO NOTHING
@@ -63,12 +48,12 @@ export async function awardBadge(fastify, userId, achievementId) {
     );
 
     if (result.rows.length > 0) {
-      fastify.log.info({ userId, achievementId }, 'Achievement awarded automatically');
+      if (logger) logger.info({ userId, achievementId }, 'Achievement awarded');
       return true;
     }
     return false;
   } catch (err) {
-    fastify.log.error({ err, userId, achievementId }, 'Error awarding achievement');
+    if (logger) logger.error({ err, userId, achievementId }, 'Error awarding achievement');
     throw err;
   }
 }
@@ -80,29 +65,382 @@ export async function checkAndAwardFoundingBadge(fastify, userId, tribeId) {
   if (!tribeId) return;
 
   try {
-    // We get the join position for this user in this tribe.
-    // In our simplified model, we use the total number of members in that tribe who joined at or before this user's registration.
-    // However, since we don't have a reliable 'joined_at' in tribe_members for re-sync, 
-    // and the counter 'waitlist_signups' is the source of truth for the cap,
-    // a manual call will check the current count and award if it's within the threshold.
-    
-    const countResult = await fastify.db.query(
-      `SELECT COUNT(*)::int as count 
-       FROM user_achievements ua
-       JOIN users u ON ua.user_id = u.id
-       WHERE ua.achievement_id = $1 AND u.tribe_id = $2`,
-      [FOUNDING_GENERAL_ID, tribeId]
-    );
+    // Check if they already have it
+    const hasFG = await hasAchievement(fastify, userId, FOUNDING_GENERAL_ID);
+    if (hasFG) return false;
 
-    const currentCount = countResult.rows[0].count;
-
-    if (currentCount < FOUNDING_THRESHOLD) {
-      await awardBadgeWithTribeCap(fastify, userId, FOUNDING_GENERAL_ID, FOUNDING_THRESHOLD);
-      return true;
-    }
-    return false;
+    // Use the robust manual awarding logic which handles metadata and caps
+    const result = await awardFoundingGeneral(fastify, userId);
+    return result.success;
   } catch (err) {
     fastify.log.error({ err, userId, tribeId }, 'Error checking founding badge qualify');
+    return false;
+  }
+}
+
+/**
+ * Get the user's join rank within their tribe
+ */
+async function getTribeJoinRank(client, userId, tribeId) {
+  const rankResult = await client.query(
+    `WITH tribe_ranks AS (
+      SELECT u.id, ROW_NUMBER() OVER (ORDER BY COALESCE(tm.joined_at, u.created_at) ASC, u.created_at ASC) as rank
+      FROM users u
+      LEFT JOIN tribe_members tm ON u.id = tm.user_id
+      WHERE u.tribe_id = $1
+    )
+    SELECT rank FROM tribe_ranks WHERE id = $2`,
+    [tribeId, userId]
+  );
+  return rankResult.rows[0]?.rank;
+}
+
+/**
+ * Award the Founding General badge manually with metadata updates
+ */
+export async function awardFoundingGeneral(fastify, userId, force = false, manualSignupNumber = null) {
+  const client = await fastify.db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Get user's tribe
+    const userResult = await client.query(
+      'SELECT tribe_id FROM users WHERE id = $1 FOR UPDATE',
+      [userId]
+    );
+    const tribeId = userResult.rows[0]?.tribe_id;
+
+    if (!tribeId) {
+      await client.query('ROLLBACK');
+      fastify.log.error({ userId }, 'User has no tribe, cannot award Founding General');
+      return { success: false, reason: 'no_tribe' };
+    }
+
+    // 1.5 Lock the tribe to ensure unique signup numbers for this tribe
+    await client.query('SELECT id FROM tribes WHERE id = $1 FOR UPDATE', [tribeId]);
+
+    // 1.6 Check if user already has the badge
+    const existingBadge = await client.query(
+      'SELECT earned_at FROM user_achievements WHERE user_id = $1 AND achievement_id = $2',
+      [userId, FOUNDING_GENERAL_ID]
+    );
+
+    let signupNumber = manualSignupNumber;
+    
+    if (existingBadge.rows.length > 0 && !manualSignupNumber) {
+      // User already has it, we check if they have a signup number in metadata
+      const existingMetadata = await client.query(
+        "SELECT metadata->'badges'->'founding_general'->>'signup_number' as num FROM users WHERE id = $1",
+        [userId]
+      );
+      if (existingMetadata.rows[0]?.num) {
+        signupNumber = parseInt(existingMetadata.rows[0].num);
+        await client.query('ROLLBACK');
+        return { success: false, reason: 'already_awarded', signupNumber };
+      }
+    }
+
+    if (!signupNumber) {
+      // 2. Determine signup number based on their registration rank in the tribe
+      const userRank = await getTribeJoinRank(client, userId, tribeId);
+
+      if (!userRank) {
+        await client.query('ROLLBACK');
+        return { success: false, reason: 'user_not_in_tribe_ranks' };
+      }
+
+      // Check cap if not forced AND user doesn't already have the badge
+      if (existingBadge.rows.length === 0 && !force && userRank > FOUNDING_THRESHOLD) {
+        await client.query('ROLLBACK');
+        return { success: false, reason: 'cap_reached', count: userRank - 1 };
+      }
+
+      signupNumber = userRank;
+    }
+
+
+    // 3. Award the badge (if not already awarded)
+    await client.query(
+      `INSERT INTO user_achievements (user_id, achievement_id, earned_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id, achievement_id) DO NOTHING`,
+      [userId, FOUNDING_GENERAL_ID]
+    );
+
+    // 4. Update tribe_members and users metadata
+    const badgeData = {
+      asset: '/assets/badges/founding_general.png',
+      signup_number: signupNumber,
+      flair_name: 'Ancient Scroll'
+    };
+
+    await client.query(`
+      INSERT INTO tribe_members (user_id, tribe_id, is_founding_general, metadata)
+      VALUES ($1, $2, true, jsonb_build_object('badges', jsonb_build_object('founding_general', $3::jsonb)))
+      ON CONFLICT (user_id) DO UPDATE
+      SET is_founding_general = true,
+          metadata = COALESCE(tribe_members.metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(tribe_members.metadata->'badges', '{}'::jsonb) || jsonb_build_object('founding_general', $3::jsonb))
+    `, [userId, tribeId, JSON.stringify(badgeData)]);
+
+    await client.query(`
+      UPDATE users
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(metadata->'badges', '{}'::jsonb) || jsonb_build_object('founding_general', $1::jsonb))
+      WHERE id = $2
+    `, [JSON.stringify(badgeData), userId]);
+
+    // 4.5 Induct into Hall of Generals (Historical Record)
+    await client.query(
+      'INSERT INTO hall_of_generals (user_id, tribe_id, reason) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+      [userId, tribeId, 'Founding General Status (Launch Phase)']
+    );
+
+    await client.query('COMMIT');
+    fastify.log.info({ userId, tribeId, signupNumber }, 'Founding General badge awarded with metadata');
+    
+    return { success: true, signupNumber };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    fastify.log.error({ err, userId }, 'Error awarding Founding General badge');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Award the Founding Captain badge
+ */
+async function awardFoundingCaptain(fastify, userId, force = false, manualSignupNumber = null, externalClient = null) {
+  const client = externalClient || await fastify.db.connect();
+  let transactionStarted = false;
+  try {
+    if (!externalClient) {
+      await client.query('BEGIN');
+      transactionStarted = true;
+    }
+
+    const userResult = await client.query('SELECT tribe_id, created_at FROM users WHERE id = $1 FOR UPDATE', [userId]);
+    const tribeId = userResult.rows[0]?.tribe_id;
+    const userCreatedAt = userResult.rows[0]?.created_at;
+
+    if (!tribeId) {
+      if (transactionStarted) await client.query('ROLLBACK');
+      return { success: false, reason: 'no_tribe' };
+    }
+
+    let signupNumber = manualSignupNumber;
+    if (!signupNumber) {
+        signupNumber = await getTribeJoinRank(client, userId, tribeId);
+    }
+
+    if (!force && signupNumber > CENTURION_THRESHOLD) {
+        if (transactionStarted) await client.query('ROLLBACK');
+        return { success: false, reason: 'cap_reached', count: signupNumber - 1 };
+    }
+
+    await client.query(
+      `INSERT INTO user_achievements (user_id, achievement_id, earned_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id, achievement_id) DO NOTHING`,
+      [userId, FOUNDING_CAPTAIN_ID]
+    );
+
+    const badgeData = {
+      asset: '/assets/badges/founding_captain.png',
+      signup_number: signupNumber,
+      flair_name: 'Vanguard'
+    };
+
+    // Ensure they are in tribe_members
+    await client.query(`
+      INSERT INTO tribe_members (user_id, tribe_id, joined_at)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (user_id) DO NOTHING
+    `, [userId, tribeId, userCreatedAt]);
+
+    await client.query(`
+      UPDATE users
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(metadata->'badges', '{}'::jsonb) || jsonb_build_object('founding_captain', $1::jsonb))
+      WHERE id = $2
+    `, [JSON.stringify(badgeData), userId]);
+
+    if (transactionStarted) await client.query('COMMIT');
+    return { success: true, signupNumber };
+  } catch (err) {
+    if (transactionStarted) await client.query('ROLLBACK');
+    fastify.log.error({ err, userId }, 'Error awarding Founding Captain badge');
+    return { success: false, reason: 'error', error: err.message };
+  } finally {
+    if (transactionStarted) client.release();
+  }
+}
+
+/**
+ * Award the Founding Centurion badge (signups 11-100)
+ */
+export async function awardFoundingCenturion(fastify, userId, force = false) {
+  const client = await fastify.db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Get user's tribe
+    const userResult = await client.query(
+      'SELECT tribe_id FROM users WHERE id = $1 FOR UPDATE',
+      [userId]
+    );
+    const tribeId = userResult.rows[0]?.tribe_id;
+
+    if (!tribeId) {
+      await client.query('ROLLBACK');
+      return { success: false, reason: 'no_tribe' };
+    }
+
+    // Lock tribe
+    await client.query('SELECT id FROM tribes WHERE id = $1 FOR UPDATE', [tribeId]);
+
+    // Check if user already has it
+    const existingBadge = await client.query(
+      'SELECT 1 FROM user_achievements WHERE user_id = $1 AND achievement_id = $2',
+      [userId, FOUNDING_CENTURION_ID]
+    );
+
+    let signupNumber;
+    if (existingBadge.rows.length > 0) {
+      const existingMetadata = await client.query(
+        "SELECT metadata->'badges'->'founding_centurion'->>'signup_number' as num FROM users WHERE id = $1",
+        [userId]
+      );
+      if (existingMetadata.rows[0]?.num) {
+        signupNumber = parseInt(existingMetadata.rows[0].num);
+      }
+    }
+
+    if (!signupNumber) {
+      // Determine signup number based on their registration rank in the tribe
+      const userRank = await getTribeJoinRank(client, userId, tribeId);
+
+      if (!userRank) {
+        await client.query('ROLLBACK');
+        return { success: false, reason: 'user_not_in_tribe_ranks' };
+      }
+
+      // Check range: Centurion is typically 11-100
+      if (existingBadge.rows.length === 0 && !force && (userRank <= FOUNDING_THRESHOLD || userRank > CENTURION_THRESHOLD)) {
+        await client.query('ROLLBACK');
+        return { success: false, reason: 'out_of_range', rank: userRank };
+      }
+
+      signupNumber = userRank;
+    }
+
+    // Award badge
+    await client.query(
+      `INSERT INTO user_achievements (user_id, achievement_id, earned_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id, achievement_id) DO NOTHING`,
+      [userId, FOUNDING_CENTURION_ID]
+    );
+
+    const badgeData = {
+      asset: '/assets/badges/founding_centurion.png',
+      signup_number: signupNumber,
+      flair_name: 'Silver Shield'
+    };
+
+    await client.query(`
+      INSERT INTO tribe_members (user_id, tribe_id, metadata)
+      VALUES ($1, $2, jsonb_build_object('badges', jsonb_build_object('founding_centurion', $3::jsonb)))
+      ON CONFLICT (user_id) DO UPDATE
+      SET metadata = COALESCE(tribe_members.metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(tribe_members.metadata->'badges', '{}'::jsonb) || jsonb_build_object('founding_centurion', $3::jsonb))
+    `, [userId, tribeId, JSON.stringify(badgeData)]);
+
+    await client.query(`
+      UPDATE users
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(metadata->'badges', '{}'::jsonb) || jsonb_build_object('founding_centurion', $1::jsonb))
+      WHERE id = $2
+    `, [JSON.stringify(badgeData), userId]);
+
+    await client.query('COMMIT');
+    fastify.log.info({ userId, tribeId, signupNumber }, 'Founding Centurion badge awarded');
+    
+    return { success: true, signupNumber };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    fastify.log.error({ err, userId }, 'Error awarding Founding Centurion badge');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+/**
+ * Award the Tribe Commander badge to the tribe leader
+ */
+export async function awardTribeCommander(fastify, tribeId) {
+  const client = await fastify.db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Find the leader (Founding Captain) for this tribe
+    const leaderResult = await client.query(
+      `SELECT u.id, u.username FROM users u
+       JOIN user_achievements ua ON u.id = ua.user_id
+       WHERE u.tribe_id = $1 AND ua.achievement_id = $2`,
+      [tribeId, FOUNDING_CAPTAIN_ID]
+    );
+
+    if (leaderResult.rows.length === 0) {
+      // Fallback: If no captain, pick the first member who joined
+      const fallbackResult = await client.query(
+        `SELECT u.id, u.username FROM users u
+         JOIN tribe_members tm ON u.id = tm.user_id
+         WHERE u.tribe_id = $1
+         ORDER BY tm.joined_at ASC
+         LIMIT 1`,
+        [tribeId]
+      );
+      
+      if (fallbackResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return { success: false, reason: 'no_leader_found' };
+      }
+      leaderResult.rows[0] = fallbackResult.rows[0];
+    }
+
+    const leaderId = leaderResult.rows[0].id;
+
+    // 2. Award the badge
+    await client.query(
+      `INSERT INTO user_achievements (user_id, achievement_id, earned_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (user_id, achievement_id) DO NOTHING`,
+      [leaderId, TRIBE_COMMANDER_ID]
+    );
+
+    // 3. Update metadata
+    const badgeData = {
+      asset: '/assets/badges/tribe_commander.png',
+      title: 'Imperial Commander',
+      flair_name: 'Golden Crest'
+    };
+
+    await client.query(`
+      UPDATE users
+      SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(metadata->'badges', '{}'::jsonb) || jsonb_build_object('tribe_commander', $1::jsonb)),
+          title = 'Imperial Commander'
+      WHERE id = $2
+    `, [JSON.stringify(badgeData), leaderId]);
+
+    await client.query('COMMIT');
+    fastify.log.info({ leaderId, tribeId }, 'Tribe Commander badge awarded to leader');
+    
+    return { success: true, leaderId };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    fastify.log.error({ err, tribeId }, 'Error awarding Tribe Commander badge');
+    throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -111,6 +449,18 @@ export async function checkAndAwardFoundingBadge(fastify, userId, tribeId) {
  * This uses a transaction and row-level locking on the tribe to ensure atomicity.
  */
 export async function awardBadgeWithTribeCap(fastify, userId, achievementId, cap = 10, force = false) {
+  // If it's Founding General, use the specialized function
+  if (achievementId === FOUNDING_GENERAL_ID) {
+    const res = await awardFoundingGeneral(fastify, userId, force);
+    return res.success;
+  }
+  
+  // If it's Founding Centurion, use the specialized function
+  if (achievementId === FOUNDING_CENTURION_ID) {
+    const res = await awardFoundingCenturion(fastify, userId, force);
+    return res.success;
+  }
+
   const client = await fastify.db.connect();
   try {
     await client.query('BEGIN');
@@ -235,211 +585,79 @@ export async function hasAchievement(fastify, userId, achievementId) {
 }
 
 /**
- * Award the Founding General badge manually with metadata updates
+ * Check and award the 25k Surge badge based on global signup count
  */
-export async function awardFoundingGeneral(fastify, userId, force = false) {
-  const client = await fastify.db.connect();
+export async function checkAndAward25kSurgeBadge(fastify, userId) {
   try {
-    await client.query('BEGIN');
-
-    // 1. Get user's tribe
-    const userResult = await client.query(
-      'SELECT tribe_id FROM users WHERE id = $1 FOR UPDATE',
-      [userId]
-    );
-    const tribeId = userResult.rows[0]?.tribe_id;
-
-    if (!tribeId) {
-      await client.query('ROLLBACK');
-      fastify.log.error({ userId }, 'User has no tribe, cannot award Founding General');
-      return { success: false, reason: 'no_tribe' };
+    // We use the redis counter for global count if available, otherwise fallback to DB
+    let count;
+    if (fastify.redis) {
+      const redisCount = await fastify.redis.get('users:total_count');
+      count = parseInt(redisCount);
     }
 
-    // 1.5 Lock the tribe to ensure unique signup numbers for this tribe
-    await client.query('SELECT id FROM tribes WHERE id = $1 FOR UPDATE', [tribeId]);
-
-    // 1.6 Check if user already has the badge
-    const existingBadge = await client.query(
-      'SELECT earned_at FROM user_achievements WHERE user_id = $1 AND achievement_id = $2',
-      [userId, FOUNDING_GENERAL_ID]
-    );
-
-    let signupNumber;
-    if (existingBadge.rows.length > 0) {
-      // User already has it, we check if they have a signup number in metadata
-      const existingMetadata = await client.query(
-        "SELECT metadata->'badges'->'founding_general'->>'signup_number' as num FROM users WHERE id = $1",
-        [userId]
-      );
-      if (existingMetadata.rows[0]?.num) {
-        signupNumber = parseInt(existingMetadata.rows[0].num);
-      } else {
-        // If they have the badge but no number, we'll assign one or keep it as is
-        // For simplicity, we'll just continue and re-assign (or keep current count)
-      }
+    if (!count) {
+      const dbResult = await fastify.db.query('SELECT COUNT(*)::int as count FROM users');
+      count = dbResult.rows[0].count;
     }
 
-    if (!signupNumber) {
-      // 2. Determine signup number by looking at the highest existing number for this tribe
-      const maxResult = await client.query(
-        `SELECT MAX((COALESCE(u.metadata->'badges'->'founding_general'->>'signup_number', '0'))::int) as max_val
-         FROM users u
-         WHERE u.tribe_id = $1`,
-        [tribeId]
-      );
-
-      const maxSignupNumber = maxResult.rows[0].max_val || 0;
-
-      // Check cap if not forced AND user doesn't already have the badge
-      if (existingBadge.rows.length === 0 && !force && maxSignupNumber >= FOUNDING_THRESHOLD) {
-        await client.query('ROLLBACK');
-        return { success: false, reason: 'cap_reached', count: maxSignupNumber };
-      }
-
-      signupNumber = maxSignupNumber + 1;
+    if (count >= SURGE_25K_MIN && count <= SURGE_25K_MAX) {
+      return await awardBadge(fastify, userId, SURGE_25K_ID);
     }
-
-    // 3. Award the badge (if not already awarded)
-    await client.query(
-      `INSERT INTO user_achievements (user_id, achievement_id, earned_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (user_id, achievement_id) DO NOTHING`,
-      [userId, FOUNDING_GENERAL_ID]
-    );
-
-    // 4. Update tribe_members and users metadata
-    const badgeData = {
-      asset: '/assets/badges/founding_general.png',
-      signup_number: signupNumber,
-      flair_name: 'Ancient Scroll'
-    };
-
-    await client.query(`
-      UPDATE tribe_members
-      SET is_founding_general = true,
-          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(metadata->'badges', '{}'::jsonb) || jsonb_build_object('founding_general', $1::jsonb))
-      WHERE user_id = $2
-    `, [JSON.stringify(badgeData), userId]);
-
-    await client.query(`
-      UPDATE users
-      SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(metadata->'badges', '{}'::jsonb) || jsonb_build_object('founding_general', $1::jsonb))
-      WHERE id = $2
-    `, [JSON.stringify(badgeData), userId]);
-
-    await client.query('COMMIT');
-    fastify.log.info({ userId, tribeId, signupNumber }, 'Founding General badge manually awarded with metadata');
-    
-    return { success: true, signupNumber };
+    return false;
   } catch (err) {
-    await client.query('ROLLBACK');
-    fastify.log.error({ err, userId }, 'Error awarding Founding General badge');
-    throw err;
-  } finally {
-    client.release();
+    fastify.log.error({ err, userId }, 'Error checking surge badge');
+    return false;
   }
 }
 
 /**
- * Award the Founding Centurion badge manually with metadata updates
+ * Backfill Surge badge for users who signed up during the window
  */
-export async function awardFoundingCenturion(fastify, userId, force = false) {
-  const client = await fastify.db.connect();
+export async function backfillSurgeBadges(fastify) {
   try {
-    await client.query('BEGIN');
-
-    // 1. Get user's tribe
-    const userResult = await client.query(
-      'SELECT tribe_id FROM users WHERE id = $1 FOR UPDATE',
-      [userId]
-    );
-    const tribeId = userResult.rows[0]?.tribe_id;
-
-    if (!tribeId) {
-      await client.query('ROLLBACK');
-      fastify.log.error({ userId }, 'User has no tribe, cannot award Founding Centurion');
-      return { success: false, reason: 'no_tribe' };
-    }
-
-    // 1.5 Lock the tribe to ensure unique signup numbers for this tribe
-    await client.query('SELECT id FROM tribes WHERE id = $1 FOR UPDATE', [tribeId]);
-
-    // 1.6 Check if user already has the badge
-    const existingBadge = await client.query(
-      'SELECT earned_at FROM user_achievements WHERE user_id = $1 AND achievement_id = $2',
-      [userId, FOUNDING_CENTURION_ID]
+    // Better: Get the IDs of the users in that range
+    const windowResult = await fastify.db.query(
+      `WITH ranked_users AS (
+        SELECT id, ROW_NUMBER() OVER (ORDER BY created_at ASC) as signup_number
+        FROM users
+      )
+      SELECT id FROM ranked_users 
+      WHERE signup_number BETWEEN $1 AND $2`,
+      [SURGE_25K_MIN, SURGE_25K_MAX]
     );
 
-    let signupNumber;
-    if (existingBadge.rows.length > 0) {
-      const existingMetadata = await client.query(
-        "SELECT metadata->'badges'->'founding_centurion'->>'signup_number' as num FROM users WHERE id = $1",
-        [userId]
-      );
-      if (existingMetadata.rows[0]?.num) {
-        signupNumber = parseInt(existingMetadata.rows[0].num);
-      }
+    const userIds = windowResult.rows.map(r => r.id);
+    let awarded = 0;
+
+    for (const userId of userIds) {
+      const success = await awardBadge(fastify, userId, SURGE_25K_ID);
+      if (success) awarded++;
     }
 
-    if (!signupNumber) {
-      // 2. Determine signup number by looking at the highest existing number for this tribe
-      // For Centurions, we start at 11 or max existing + 1
-      const maxResult = await client.query(
-        `SELECT MAX((COALESCE(u.metadata->'badges'->'founding_centurion'->>'signup_number', '10'))::int) as max_val
-         FROM users u
-         WHERE u.tribe_id = $1`,
-        [tribeId]
-      );
-
-      const maxSignupNumber = maxResult.rows[0].max_val || 10;
-
-      // Check cap if not forced AND user doesn't already have the badge
-      if (existingBadge.rows.length === 0 && !force && maxSignupNumber >= CENTURION_THRESHOLD) {
-        await client.query('ROLLBACK');
-        return { success: false, reason: 'cap_reached', count: maxSignupNumber };
-      }
-
-      signupNumber = maxSignupNumber + 1;
-    }
-
-    // 3. Award the badge (if not already awarded)
-    await client.query(
-      `INSERT INTO user_achievements (user_id, achievement_id, earned_at)
-       VALUES ($1, $2, NOW())
-       ON CONFLICT (user_id, achievement_id) DO NOTHING`,
-      [userId, FOUNDING_CENTURION_ID]
-    );
-
-    // 4. Update tribe_members and users metadata
-    const badgeData = {
-      asset: '/assets/badges/founding_centurion.png',
-      signup_number: signupNumber,
-      flair_name: 'Silver Legion'
-    };
-
-    await client.query(`
-      UPDATE tribe_members
-      SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(metadata->'badges', '{}'::jsonb) || jsonb_build_object('founding_centurion', $1::jsonb))
-      WHERE user_id = $2
-    `, [JSON.stringify(badgeData), userId]);
-
-    await client.query(`
-      UPDATE users
-      SET metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('badges', COALESCE(metadata->'badges', '{}'::jsonb) || jsonb_build_object('founding_centurion', $1::jsonb))
-      WHERE id = $2
-    `, [JSON.stringify(badgeData), userId]);
-
-    await client.query('COMMIT');
-    fastify.log.info({ userId, tribeId, signupNumber }, 'Founding Centurion badge manually awarded with metadata');
-    
-    return { success: true, signupNumber };
+    return { totalInRange: userIds.length, awarded };
   } catch (err) {
-    await client.query('ROLLBACK');
-    fastify.log.error({ err, userId }, 'Error awarding Founding Centurion badge');
+    fastify.log.error({ err }, 'Error backfilling surge badges');
     throw err;
-  } finally {
-    client.release();
   }
 }
 
-export { FOUNDING_GENERAL_ID, FOUNDING_CENTURION_ID, FOUNDING_PRO_ID, FOUNDING_RECRUITER_ID, FOUNDING_CAPTAIN_ID, ARES_SURGE_ID, FOUNDING_THRESHOLD, CENTURION_THRESHOLD };
+export { 
+  FOUNDING_GENERAL_ID, 
+  FOUNDING_PRO_ID, 
+  FOUNDING_RECRUITER_ID, 
+  FOUNDING_CAPTAIN_ID, 
+  awardFoundingCaptain,
+  FOUNDING_CENTURION_ID,
+  EKO_VANGUARD_ID,
+  SURGE_25K_ID,
+  SURGE_50K_ID,
+  TRIBE_COMMANDER_ID,
+  SEERS_EYE_BADGE_ID,
+  ARES_SURGE_ID,
+  FOUNDING_THRESHOLD, 
+  CENTURION_THRESHOLD,
+  SILVER_ORACLE_THRESHOLD,
+  GOLD_ORACLE_THRESHOLD,
+  OBSIDIAN_ORACLE_THRESHOLD
+};

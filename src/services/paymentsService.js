@@ -9,8 +9,9 @@
 
 import crypto from 'crypto';
 import { createCheckoutSession, retrieveCheckoutSession, handleStripePaymentSuccess, createCustomerPortalSession, refundStripePayment as stripeRefund, verifyStripeWebhookSignature as stripeVerify, EUROPE_PRICING } from './stripeService.js';
-import { awardBadge, FOUNDING_PRO_ID } from './achievementService.js';
+import { awardBadge, FOUNDING_PRO_ID, EKO_VANGUARD_ID } from './achievementService.js';
 import { initializeMockPayment } from './mockPaymentsService.js';
+import { REGIONAL_CONFIG, GOAL_TOKEN_PACKS } from '../config/pricing.js';
 
 // ─── ZAR / Paystack ──────────────────────────────────────────────────────────
 
@@ -30,10 +31,10 @@ export function verifyPaystackWebhookSignature(payload, signature) {
 }
 
 /**
- * Initialize a Paystack payment for ZAR
+ * Initialize a Paystack payment (Generic for NGN, GHS, ZAR, KES)
  */
-export async function initializePayment(fastify, { userId, amountInZAR, email, plan = 'tier_pro', callbackUrl }) {
-  const amountInKobo = Math.round(amountInZAR * 100);
+export async function initializePaystackPayment(fastify, { userId, amount, currency, email, plan, callbackUrl }) {
+  const amountInSmallestUnit = Math.round(amount * 100);
   const reference = `GM_${Date.now()}_${userId.slice(0, 8)}`;
 
   try {
@@ -44,13 +45,13 @@ export async function initializePayment(fastify, { userId, amountInZAR, email, p
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        amount: amountInKobo,
-        currency: 'ZAR',
+        amount: amountInSmallestUnit,
+        currency: currency.toUpperCase(),
         email,
         reference,
         callback_url: callbackUrl || `${process.env.APP_URL || 'http://localhost:8080'}/payments/callback`,
         metadata: { userId, plan, platform: 'goalmind' },
-        channels: ['card', 'eft'],
+        channels: ['card', 'eft', 'mobile_money', 'ussd'],
       }),
     });
 
@@ -63,9 +64,9 @@ export async function initializePayment(fastify, { userId, amountInZAR, email, p
 
     await fastify.db.query(
       `INSERT INTO payments (reference, user_id, amount, currency, status, plan, provider, metadata)
-       VALUES ($1, $2, $3, 'ZAR', 'pending', $4, 'paystack', $5)
+       VALUES ($1, $2, $3, $4, 'pending', $5, 'paystack', $6)
        ON CONFLICT (reference) DO NOTHING`,
-      [reference, userId, amountInZAR, plan, JSON.stringify({ provider_ref: data.data.reference })]
+      [reference, userId, amount, currency, plan, JSON.stringify({ provider_ref: data.data.reference })]
     );
 
     return {
@@ -73,14 +74,21 @@ export async function initializePayment(fastify, { userId, amountInZAR, email, p
       data: {
         authorizationUrl: data.data.authorization_url,
         reference: data.data.reference,
-        amountInZAR,
-        currency: 'ZAR',
+        amount,
+        currency,
       },
     };
   } catch (err) {
     fastify.log.error({ err }, 'Paystack initialize error');
     return { success: false, error: 'Payment service unavailable' };
   }
+}
+
+/**
+ * Initialize a Paystack payment for ZAR (Deprecated - use initializePaystackPayment)
+ */
+export async function initializePayment(fastify, { userId, amountInZAR, email, plan = 'tier_pro', callbackUrl }) {
+  return initializePaystackPayment(fastify, { userId, amount: amountInZAR, currency: 'ZAR', email, plan, callbackUrl });
 }
 
 /**
@@ -141,10 +149,18 @@ export async function handleSuccessfulPayment(fastify, reference, userId, plan, 
       tribe_gems_100: { gems: 100, one_time: true },
       tribe_gems_500: { gems: 500, one_time: true }, // Added
       tribe_gems_1200: { gems: 1200, one_time: true }, // Added
+      // GoalToken packs
+      goal_tokens_impulse: { goal_tokens: 50, one_time: true },
+      goal_tokens_warrior: { goal_tokens: 250, one_time: true },
+      goal_tokens_tribe_leader: { goal_tokens: 1000, one_time: true },
+      // Prestige Monetization
+      tournament_entry: { one_time: true, type: 'tournament_entry' },
+      badge_unlock: { one_time: true, type: 'badge_unlock' },
+      lagos_pro_starter: { goal_tokens: 500, one_time: true, type: 'lagos_pro_starter' }
     };
 
-    const config = planConfig[plan] || { gems: 0, one_time: true };
-    let finalGems = config.gems;
+    const config = planConfig[plan] || { gems: 0, goal_tokens: 0, one_time: true };
+    let finalGems = config.gems || 0;
 
     // --- Golden Lightning Multiplier (Ares Surge Badge) ---
     const hasAresSurgeRes = await client.query(
@@ -158,20 +174,56 @@ export async function handleSuccessfulPayment(fastify, reference, userId, plan, 
     await client.query(
       `UPDATE users SET
          gems = COALESCE(gems, 0) + $1,
-         is_pro = CASE WHEN $2 LIKE 'tier_pro%' THEN true ELSE is_pro END,
-         pro_expires_at = CASE WHEN $2 = 'tier_pro' OR $2 = 'tier_pro_monthly' THEN NOW() + INTERVAL '1 day' * $3
-                               WHEN $2 = 'tier_pro_annual' THEN NOW() + INTERVAL '1 day' * $3
+         goal_tokens = COALESCE(goal_tokens, 0) + $2,
+         is_pro = CASE WHEN $3 LIKE 'tier_pro%' THEN true ELSE is_pro END,
+         pro_expires_at = CASE WHEN $3 = 'tier_pro' OR $3 = 'tier_pro_monthly' THEN NOW() + INTERVAL '1 day' * $4
+                               WHEN $3 = 'tier_pro_annual' THEN NOW() + INTERVAL '1 day' * $4
                                ELSE pro_expires_at END,
          last_active_at = NOW()
-       WHERE id = $4`,
-      [finalGems, plan, config.duration_days || 30, userId]
+       WHERE id = $5`,
+      [finalGems, config.goal_tokens || 0, plan, config.duration_days || 30, userId]
     );
 
-    await client.query(
-      `INSERT INTO gem_transactions (user_id, amount, currency, provider, reference, type, created_at)
-       VALUES ($1, $2, $3, $4, $5, 'purchase', NOW())`,
-      [userId, finalGems, currency, provider, reference]
-    );
+    // Specific logic for tournament entry or badge unlock
+    if (config.type === 'tournament_entry') {
+        // Log tournament entry intent - would typically join a table
+        await client.query(
+            'INSERT INTO system_events (event_type, user_id, metadata) VALUES ($1, $2, $3)',
+            ['TOURNAMENT_ENTRY_PAID', userId, JSON.stringify({ reference, plan })]
+        );
+    } else if (config.type === 'badge_unlock') {
+        // Logic to award a generic prestige badge or handle via metadata
+        const badgeId = '770e8400-e29b-41d4-a716-446655440005'; // Example: Paid Prestige Badge
+        await awardBadge(fastify, userId, badgeId);
+    } else if (config.type === 'lagos_pro_starter') {
+        // Lagos Pro Starter Logic
+        await awardBadge(fastify, userId, EKO_VANGUARD_ID);
+        
+        // 1.2x Multiplier for 24h
+        await client.query(
+          `UPDATE users SET 
+             active_multiplier = 1.20,
+             multiplier_expires_at = NOW() + INTERVAL '24 hours'
+           WHERE id = $1`,
+          [userId]
+        );
+    }
+
+    if (config.gems > 0) {
+      await client.query(
+        `INSERT INTO gem_transactions (user_id, amount, currency, provider, reference, type, created_at)
+         VALUES ($1, $2, $3, $4, $5, 'purchase', NOW())`,
+        [userId, finalGems, currency, provider, reference]
+      );
+    }
+
+    if (config.goal_tokens > 0) {
+      await client.query(
+        `INSERT INTO gem_transactions (user_id, amount, currency, provider, reference, type, created_at)
+         VALUES ($1, $2, 'GOALTOKEN', $3, $4, 'purchase', NOW())`,
+        [userId, config.goal_tokens, provider, reference]
+      );
+    }
 
     // Referral Commission Logic (The Recruiter's War-Chest)
     try {
@@ -318,20 +370,32 @@ export const ZAR = {
   },
 };
 
-export { EUROPE_PRICING };
+export { EUROPE_PRICING, REGIONAL_CONFIG, GOAL_TOKEN_PACKS };
 
 // ─── Unified initialize for all currencies ─────────────────────────────────
 
 export async function initializePaymentByCurrency(fastify, { userId, planId, currency, email, callbackUrl }) {
   const upperCurrency = currency.toUpperCase();
+  const regional = REGIONAL_CONFIG[upperCurrency];
 
   if (upperCurrency === 'MOCK') {
-    return initializeMockPayment(fastify, { userId, amount: getZARAmountForPlan(planId), email, plan: planId, callbackUrl });
+    return initializeMockPayment(fastify, { userId, amount: getAmountForPlan(planId, 'ZAR'), email, plan: planId, callbackUrl });
   }
 
-  if (upperCurrency === 'ZAR') {
-    const amountZAR = getZARAmountForPlan(planId);
-    return initializePayment(fastify, { userId, amountInZAR: amountZAR, email, plan: planId, callbackUrl });
+  if (regional) {
+    const amount = getAmountForPlan(planId, upperCurrency);
+    if (regional.provider === 'paystack') {
+      return initializePaystackPayment(fastify, { userId, amount, currency: upperCurrency, email, plan: planId, callbackUrl });
+    } else {
+      // Use Stripe for other regional currencies
+      return createCheckoutSession(fastify, {
+        userId,
+        planId,
+        currency: upperCurrency,
+        email,
+        callbackUrl,
+      });
+    }
   }
 
   if (upperCurrency === 'GBP' || upperCurrency === 'EUR') {
@@ -347,21 +411,43 @@ export async function initializePaymentByCurrency(fastify, { userId, planId, cur
   return { success: false, error: 'Unsupported currency' };
 }
 
-function getZARAmountForPlan(planId) {
-  if (planId === 'tier_pro_monthly') return ZAR.PRO_PRICE_ZAR;
-  if (planId === 'tier_pro_annual') return ZAR.PRO_PRICE_ZAR_ANNUAL;
-  const gemPack = Object.values(ZAR.GEM_PACKS).find(p => planId.includes(String(p.gems)));
-  if (gemPack) return gemPack.priceZAR;
+function getAmountForPlan(planId, currency) {
+  const upperCurrency = currency.toUpperCase();
+  const regional = REGIONAL_CONFIG[upperCurrency];
+
+  if (planId === 'tier_pro_monthly') return regional?.pro?.monthly?.price || 39.99;
+  if (planId === 'tier_pro_annual') return regional?.pro?.annual?.price || 399.99;
+  
+  // GoalToken packs
+  if (planId.startsWith('goal_tokens_')) {
+    const packId = planId.replace('goal_tokens_', '');
+    return regional?.packs?.[packId]?.price || GOAL_TOKEN_PACKS[packId]?.priceUSD || 0;
+  }
+
+  // Prestige items
+  if (planId === 'tournament_entry') return regional?.prestige?.tournament_entry?.price || 5.00;
+  if (planId === 'badge_unlock') return regional?.prestige?.badge_unlock?.price || 25.00;
+  if (planId === 'lagos_pro_starter') return regional?.prestige?.lagos_pro_starter?.price || 5.00;
+
+  // Gem packs (Legacy ZAR logic)
+  if (upperCurrency === 'ZAR') {
+    const gemPack = Object.values(ZAR.GEM_PACKS).find(p => planId.includes(String(p.gems)));
+    if (gemPack) return gemPack.priceZAR;
+  }
+  
   return 0;
 }
 
 export default {
   verifyPaystackWebhookSignature,
   initializePayment,
+  initializePaystackPayment,
   verifyTransaction,
   handleSuccessfulPayment,
   refundTransaction,
   initializePaymentByCurrency,
   ZAR,
   EUROPE_PRICING,
+  REGIONAL_CONFIG,
+  GOAL_TOKEN_PACKS,
 };

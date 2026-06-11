@@ -1,5 +1,6 @@
 import config from '../config.js';
 import { processWeeklyPromotionRelegation, checkAndTransitionSeasons } from './leagueSystemService.js';
+import { backfillSurgeBadges } from './achievementService.js';
 
 /**
  * Background Jobs Service
@@ -16,11 +17,13 @@ const PREDICTION_VALIDATION_INTERVAL_MS = 60 * 60 * 1000; // Every hour
 // League System Job intervals
 const SEASON_TRANSITION_CHECK_MS = 60 * 60 * 1000; // Every hour (check for season end/offseason)
 const WEEKLY_PR_CHECK_DAY_MS = 7 * 24 * 60 * 60 * 1000; // Weekly (but we track day-of-week)
+const GUEST_CLEANUP_INTERVAL_MS = 12 * 60 * 60 * 1000; // Every 12 hours
 
 let varCleanupTimer = null;
 let predictionValidationTimer = null;
 let seasonTransitionTimer = null;
 let weeklyPRTimer = null;
+let guestCleanupTimer = null;
 let lastPRProcessedDay = -1;
 
 /**
@@ -42,6 +45,13 @@ export function startBackgroundJobs(fastify) {
       fastify.log.error({ err }, 'Prediction validation job failed');
     });
   }, PREDICTION_VALIDATION_INTERVAL_MS);
+
+  // ─── Guest Session Cleanup (every 12 hours) ─────────────────
+  guestCleanupTimer = setInterval(() => {
+    cleanupExpiredGuestSessions(fastify).catch(err => {
+      fastify.log.error({ err }, 'Guest session cleanup job failed');
+    });
+  }, GUEST_CLEANUP_INTERVAL_MS);
 
   // ─── League System: Season Transition Check (every hour) ─────────────────
   seasonTransitionTimer = setInterval(() => {
@@ -70,6 +80,15 @@ export function startBackgroundJobs(fastify) {
     }
   }, SEASON_TRANSITION_CHECK_MS); // Reuse same interval since both are hourly
 
+  // ─── Backfill Surge Badges (run once at startup) ─────────────────
+  backfillSurgeBadges(fastify).then(result => {
+    if (result && result.awarded > 0) {
+      fastify.log.info({ ...result }, 'Backfill Surge Badges complete');
+    }
+  }).catch(err => {
+    fastify.log.error({ err }, 'Backfill Surge Badges failed');
+  });
+
   fastify.log.info('Background jobs started (WC2026 + League System)');
 }
 
@@ -81,6 +100,66 @@ export function stopBackgroundJobs() {
   if (predictionValidationTimer) clearInterval(predictionValidationTimer);
   if (seasonTransitionTimer) clearInterval(seasonTransitionTimer);
   if (weeklyPRTimer) clearInterval(weeklyPRTimer);
+  if (guestCleanupTimer) clearInterval(guestCleanupTimer);
+}
+
+/**
+ * Cleanup expired guest sessions and inactive guest users (>24h)
+ */
+async function cleanupExpiredGuestSessions(fastify) {
+  const client = await fastify.db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Cleanup guest_sessions table
+    const sessionResult = await client.query(
+      'DELETE FROM guest_sessions WHERE expires_at < NOW()'
+    );
+    if (sessionResult.rowCount > 0) {
+      fastify.log.info(`Guest cleanup: removed ${sessionResult.rowCount} expired guest_sessions`);
+    }
+
+    // 2. Cleanup guest users from users table (>24h)
+    // First, find guest users to be deleted to decrement tribe counts
+    const oldGuests = await client.query(
+      "SELECT id, tribe_id FROM users WHERE role = 'guest' AND created_at < NOW() - INTERVAL '24 hours'"
+    );
+
+    if (oldGuests.rows.length > 0) {
+      const guestIds = oldGuests.rows.map(g => g.id);
+      
+      // Decrement tribe member counts
+      for (const guest of oldGuests.rows) {
+        if (guest.tribe_id) {
+          await client.query(
+            'UPDATE tribes SET member_count = GREATEST(0, member_count - 1) WHERE id = $1',
+            [guest.tribe_id]
+          );
+        }
+      }
+
+      // Delete from tribe_members (if not cascading)
+      await client.query(
+        'DELETE FROM tribe_members WHERE user_id = ANY($1)',
+        [guestIds]
+      );
+
+      // Delete from users
+      const userDeleteResult = await client.query(
+        "DELETE FROM users WHERE id = ANY($1)",
+        [guestIds]
+      );
+      
+      fastify.log.info(`Guest cleanup: removed ${userDeleteResult.rowCount} inactive guest users (>24h)`);
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 /**

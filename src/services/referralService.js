@@ -4,11 +4,42 @@
  */
 
 import crypto from 'crypto';
-import { awardBadge, awardBadgeWithTribeCap, awardBadgeWithGlobalCap, FOUNDING_GENERAL_ID, FOUNDING_PRO_ID, FOUNDING_RECRUITER_ID, FOUNDING_CAPTAIN_ID, FOUNDING_THRESHOLD } from './achievementService.js';
+import { 
+  awardBadge, 
+  awardBadgeWithTribeCap, 
+  awardBadgeWithGlobalCap, 
+  FOUNDING_GENERAL_ID, 
+  FOUNDING_PRO_ID, 
+  FOUNDING_RECRUITER_ID, 
+  FOUNDING_CAPTAIN_ID, 
+  FOUNDING_THRESHOLD,
+  SILVER_ORACLE_THRESHOLD,
+  GOLD_ORACLE_THRESHOLD,
+  OBSIDIAN_ORACLE_THRESHOLD,
+  SEERS_EYE_BADGE_ID
+} from './achievementService.js';
+import { getDerbyMultipliers } from './derbyService.js';
+import { creditTokens, TRANSACTION_TYPES } from './goalTokenService.js';
 
 // Referral link prefix (used as deep link base)
 const REFERRAL_PREFIX = 'goalmind://referral';
 const WEB_REFERRAL_BASE = process.env.APP_URL || 'http://34.105.80.179';
+
+// Big 7 Partner Codes Mapping
+export const PARTNER_CODES = {
+  'GM_ORP': '1f37663a-af6f-43a3-8aff-b308b78bb8dd', // Orlando Pirates
+  'GM_AHL': '92bb68bb-dd1a-4e3f-b9a2-4c795ec8d219', // Al Ahly
+  'GM_ZAM': 'd1acfa09-485d-4a90-b39f-4c2745820974', // Zamalek
+  'GM_SIM': 'b9d9fc32-15e5-4221-be61-4231a6e05671', // Simba SC
+  'GM_TPM': '3831ea9a-4156-4943-8746-b25d86fd41c9', // TP Mazembe
+  'GM_KZC': 'bbe8ff8f-e246-4e31-b46d-cfc7fe93326e', // Kaizer Chiefs
+  'GM_YAN': 'c7d324cf-2419-4daa-85a1-dd3dd136f297', // Young Africans SC
+  'GM_RCA': '3c797d04-188e-4688-88a3-6361f9eaa028', // Raja Casablanca
+  'GM_MSD': '418514fd-8761-4a87-9d28-08400a7efb66', // Mamelodi Sundowns
+  'GM_EST': '28761216-5166-4ae2-acd7-340fa44d39e7', // Espérance de Tunis
+};
+
+export const PARTNER_SYSTEM_USER_ID = '00000000-0000-4000-a000-000000000000';
 
 // Generate unique referral code for a user
 export function generateReferralCode(userId, tribeId) {
@@ -54,6 +85,37 @@ export function parseReferralCode(referralData) {
   return null;
 }
 
+// Resolve referrer ID from code, supporting partner codes
+export async function resolveReferrerId(fastify, referralCode) {
+  if (!referralCode) return { referrerId: null, effectiveTribeId: null };
+  
+  const upperCode = referralCode.toUpperCase();
+  
+  // 1. Check partner codes
+  const basePartnerCode = Object.keys(PARTNER_CODES).find(code => upperCode.startsWith(code));
+  if (basePartnerCode) {
+    return { 
+      referrerId: PARTNER_SYSTEM_USER_ID, 
+      effectiveTribeId: PARTNER_CODES[basePartnerCode] 
+    };
+  }
+  
+  // 2. Check user codes
+  const refResult = await fastify.db.query(
+    'SELECT id, tribe_id FROM users WHERE referral_code = $1',
+    [upperCode]
+  );
+  
+  if (refResult.rows.length > 0) {
+    return { 
+      referrerId: refResult.rows[0].id, 
+      effectiveTribeId: refResult.rows[0].tribe_id 
+    };
+  }
+  
+  return { referrerId: null, effectiveTribeId: null };
+}
+
 // Referral attribution record (stored when user joins via referral)
 export async function recordReferralAttribution(fastify, { referrerId, recruitId, referralCode, tribeId, source }) {
   try {
@@ -63,6 +125,12 @@ export async function recordReferralAttribution(fastify, { referrerId, recruitId
       `INSERT INTO referrals (id, referrer_id, recruit_id, referral_code, tribe_id, source, status, created_at, converted_at)
        VALUES ($1, $2, $3, $4, $5, $6, 'joined', NOW(), NOW())`,
       [id, referrerId, recruitId, referralCode, tribeId, source || 'direct']
+    );
+
+    // Ensure recruit's referred_by is set in the users table
+    await fastify.db.query(
+      `UPDATE users SET referred_by = $1 WHERE id = $2 AND referred_by IS NULL`,
+      [referrerId, recruitId]
     );
     
     // Update referrer's referral count
@@ -92,13 +160,25 @@ export async function checkAndAwardMilestoneRewards(fastify, referrerId, milesto
   
   // Milestone 1: Recruit joined same tribe
   if (milestone === 'joined' && recruitId) {
+    const derbyMultipliers = await getDerbyMultipliers(fastify);
+    const gtBonus = Math.round(100 * derbyMultipliers.founding_recruiter_bounty);
+
     rewards.push({ type: 'nation_points', amount: 500, label: 'Referral join bonus' });
+    rewards.push({ type: 'goal_tokens', amount: gtBonus, label: 'Founding Recruiter GT Bonus' });
     
     // Credit 500 Nation Points to referrer
     await fastify.db.query(
       `UPDATE users SET nation_points = COALESCE(nation_points, 0) + 500 WHERE id = $1`,
       [referrerId]
     );
+
+    // Credit GT Bonus to referrer
+    await creditTokens(fastify, {
+      userId: referrerId,
+      amount: gtBonus,
+      type: TRANSACTION_TYPES.REFERRAL_BONUS,
+      referenceId: recruitId
+    });
     
     // Credit 3-day Pro trial to recruit
     await fastify.db.query(
@@ -116,20 +196,22 @@ export async function checkAndAwardMilestoneRewards(fastify, referrerId, milesto
       [referrerId]
     );
     
-    // Credit 200 IQ Coins to recruit
-    let rewardGems = 200;
+    // Credit GoalTokens to recruit
+    let amount = 200;
     const hasAresSurgeRes = await fastify.db.query(
       "SELECT 1 FROM user_achievements WHERE user_id = $1 AND achievement_id = '4b6c8914-87be-47ea-8942-d64e9a8f2765'",
       [recruitId]
     );
     if (hasAresSurgeRes.rows.length > 0) {
-      rewardGems = Math.round(rewardGems * 1.2);
+      amount = Math.round(amount * 1.2);
     }
 
-    await fastify.db.query(
-      `UPDATE users SET gems = COALESCE(gems, 0) + $1 WHERE id = $2`,
-      [rewardGems, recruitId]
-    );
+    await creditTokens(fastify, {
+      userId: recruitId,
+      amount,
+      type: TRANSACTION_TYPES.INITIAL_GRANT,
+      metadata: { reason: '5_battles_milestone_recruit', multiplied: amount > 200 }
+    });
   }
   
   // Milestone 2.5: Founding Recruiter Sprint (5 recruits)
@@ -210,12 +292,14 @@ export async function checkAndAwardMilestoneRewards(fastify, referrerId, milesto
       [referrerId]
     );
     
-    // Credit 500 IQ Coins to recruit
+    // Credit 500 GoalTokens to recruit
     if (recruitId) {
-      await fastify.db.query(
-        `UPDATE users SET gems = COALESCE(gems, 0) + 500 WHERE id = $1`,
-        [recruitId]
-      );
+      await creditTokens(fastify, {
+        userId: recruitId,
+        amount: 500,
+        type: TRANSACTION_TYPES.INITIAL_GRANT,
+        metadata: { reason: 'regional_tier_milestone_recruit' }
+      });
     }
   }
   
@@ -234,22 +318,118 @@ export async function checkAndAwardMilestoneRewards(fastify, referrerId, milesto
   if (referral_count >= 25) {
     rewards.push({ type: 'badge', badge: 'National Hero', label: 'National Hero badge' });
     rewards.push({ type: 'badge', badge: 'Top Recruiter', label: 'Top Recruiter leaderboard' });
-    
+
     await fastify.db.query(
       `UPDATE users SET title = 'National Hero' WHERE id = $1 AND title IS NULL`,
       [referrerId]
     );
-    
+
     // Award National Hero badge
     await fastify.db.query(
-      `INSERT INTO user_badges (user_id, badge_id, awarded_at) 
+      `INSERT INTO user_badges (user_id, badge_id, awarded_at)
        SELECT $1, id, NOW() FROM badges WHERE slug = 'national_hero' AND NOT EXISTS (SELECT 1 FROM user_badges WHERE user_id = $1 AND badge_id = (SELECT id FROM badges WHERE slug = 'national_hero'))`,
       [referrerId]
     );
   }
-  
+
+  // --- 🌊 Whale Hunter Influencer Tiers (Centurion Surge) ---
+
+  // 1. Silver Oracle (5,000 recruits)
+  if (referral_count >= SILVER_ORACLE_THRESHOLD) {
+    const { oracle_status } = await fastify.db.query(
+      `SELECT oracle_status FROM users WHERE id = $1`,
+      [referrerId]
+    ).then(r => r.rows[0] || {});
+
+    if (oracle_status === null) {
+      rewards.push({ type: 'oracle_status', tier: 'silver', label: 'Silver Oracle Status' });
+      rewards.push({ type: 'goal_tokens', amount: 5000, label: 'Silver Oracle GT Bonus' });
+
+      await fastify.db.query(
+        `UPDATE users SET oracle_status = 'silver' WHERE id = $1`,
+        [referrerId]
+      );
+
+      await creditTokens(fastify, {
+        userId: referrerId,
+        amount: 5000,
+        type: TRANSACTION_TYPES.REFERRAL_BONUS,
+        metadata: { tier: 'silver_oracle' }
+      });
+
+      // Custom "Tribe Voice" Emote Pack (represented as collectible)
+      await fastify.db.query(
+        `INSERT INTO user_collectibles (id, user_id, collectible_id, acquired_at)
+         VALUES (gen_random_uuid(), $1, 'emote_pack_tribe_voice', NOW())
+         ON CONFLICT (user_id, collectible_id) DO NOTHING`,
+        [referrerId]
+      );
+    }
+  }
+
+  // 2. Gold Oracle (10,000 recruits)
+  if (referral_count >= GOLD_ORACLE_THRESHOLD) {
+    const { oracle_status } = await fastify.db.query(
+      `SELECT oracle_status FROM users WHERE id = $1`,
+      [referrerId]
+    ).then(r => r.rows[0] || {});
+
+    if (oracle_status === 'silver') {
+      rewards.push({ type: 'oracle_status', tier: 'gold', label: 'Gold Oracle Status' });
+      rewards.push({ type: 'goal_tokens', amount: 15000, label: 'Gold Oracle GT Bonus' });
+
+      await fastify.db.query(
+        `UPDATE users SET oracle_status = 'gold', title = 'Oracle' WHERE id = $1`,
+        [referrerId]
+      );
+
+      await creditTokens(fastify, {
+        userId: referrerId,
+        amount: 15000,
+        type: TRANSACTION_TYPES.REFERRAL_BONUS,
+        metadata: { tier: 'gold_oracle' }
+      });
+
+      // Award "The Seer's Eye" Badge
+      await awardBadge(fastify, referrerId, SEERS_EYE_BADGE_ID);
+    }
+  }
+
+  // 3. Obsidian Oracle (20,000 recruits)
+  if (referral_count >= OBSIDIAN_ORACLE_THRESHOLD) {
+    const { oracle_status } = await fastify.db.query(
+      `SELECT oracle_status FROM users WHERE id = $1`,
+      [referrerId]
+    ).then(r => r.rows[0] || {});
+
+    if (oracle_status === 'gold') {
+      rewards.push({ type: 'oracle_status', tier: 'obsidian', label: 'Obsidian Oracle Status' });
+      rewards.push({ type: 'goal_tokens', amount: 50000, label: 'Obsidian Oracle GT Bonus' });
+
+      await fastify.db.query(
+        `UPDATE users SET oracle_status = 'obsidian' WHERE id = $1`,
+        [referrerId]
+      );
+
+      await creditTokens(fastify, {
+        userId: referrerId,
+        amount: 50000,
+        type: TRANSACTION_TYPES.REFERRAL_BONUS,
+        metadata: { tier: 'obsidian_oracle' }
+      });
+
+      // Animated Obsidian Frame
+      await fastify.db.query(
+        `INSERT INTO user_collectibles (id, user_id, collectible_id, acquired_at)
+         VALUES (gen_random_uuid(), $1, 'frame_obsidian_oracle', NOW())
+         ON CONFLICT (user_id, collectible_id) DO NOTHING`,
+        [referrerId]
+      );
+    }
+  }
+
   if (rewards.length > 0) {
-    fastify.log.info({ referrerId, milestone, rewards }, 'Milestone rewards awarded');
+
   }
   
   return rewards;
@@ -289,7 +469,7 @@ export async function getTopRecruiters(fastify, { limit = 10, tribeId = null } =
 // Get user's referral stats
 export async function getUserReferralStats(fastify, userId) {
   const user = await fastify.db.query(
-    `SELECT referral_count, nation_points, title FROM users WHERE id = $1`,
+    `SELECT referral_count, nation_points, title, oracle_status, last_herald_horn_at FROM users WHERE id = $1`,
     [userId]
   ).then(r => r.rows[0]);
   
@@ -309,14 +489,20 @@ export async function getUserReferralStats(fastify, userId) {
     nextReward: count < 5 ? 'Reach 5 recruits for Founding Recruiter' : 
                 count < 10 ? 'Reach 10 recruits for Tribe General' : 
                 count < 25 ? 'Reach 25 recruits for National Hero' : 
-                count < 50 ? 'Reach 50 recruits for Founding General' : 'Max level reached',
+                count < SILVER_ORACLE_THRESHOLD ? `Reach ${SILVER_ORACLE_THRESHOLD} for Silver Oracle` :
+                count < GOLD_ORACLE_THRESHOLD ? `Reach ${GOLD_ORACLE_THRESHOLD} for Gold Oracle` :
+                count < OBSIDIAN_ORACLE_THRESHOLD ? `Reach ${OBSIDIAN_ORACLE_THRESHOLD} for Obsidian Oracle` : 'Max level reached',
     foundingRecruiterProgress: Math.min(100, (count / 5) * 100),
     tribeGeneralProgress: Math.min(100, (count / 10) * 100),
     nationalHeroProgress: Math.min(100, (count / 25) * 100),
     foundingGeneralProgress: Math.min(100, (count / 50) * 100),
     foundingCaptainProgress: Math.min(100, (count / 50) * 100),
+    silverOracleProgress: Math.min(100, (count / SILVER_ORACLE_THRESHOLD) * 100),
+    goldOracleProgress: Math.min(100, (count / GOLD_ORACLE_THRESHOLD) * 100),
+    obsidianOracleProgress: Math.min(100, (count / OBSIDIAN_ORACLE_THRESHOLD) * 100),
     currentTitle: user?.title || null,
     nationPoints: user?.nation_points || 0,
+    oracleStatus: user?.oracle_status || null,
   };
   
   return {
@@ -329,6 +515,44 @@ export async function getUserReferralStats(fastify, userId) {
       joinedAt: r.converted_at,
     })),
   };
+}
+
+// Prepare the infrastructure for 'The Herald's Horn' global notification trigger (Obsidian Tier)
+export async function triggerHeraldsHorn(fastify, userId, message) {
+  const user = await fastify.db.query(
+    `SELECT oracle_status, last_herald_horn_at FROM users WHERE id = $1`,
+    [userId]
+  ).then(r => r.rows[0]);
+
+  if (!user || user.oracle_status !== 'obsidian') {
+    throw new Error('Unauthorized: Only Obsidian Oracles can use The Herald\'s Horn');
+  }
+
+  const now = new Date();
+  if (user.last_herald_horn_at && (now - new Date(user.last_herald_horn_at)) < 24 * 60 * 60 * 1000) {
+    throw new Error('Cooldown: The Herald\'s Horn can only be used once every 24 hours');
+  }
+
+  // Record usage
+  await fastify.db.query(
+    `UPDATE users SET last_herald_horn_at = NOW() WHERE id = $1`,
+    [userId]
+  );
+
+  // Emit to logs and prepare for global broadcast
+  fastify.log.info({ userId, message }, 'Heralds Horn triggered!');
+  
+  // In a system with WebSockets, we would publish to Redis for all instances to broadcast
+  if (fastify.redis) {
+    await fastify.redis.publish('global_notifications', JSON.stringify({
+      type: 'heralds_horn',
+      userId,
+      message,
+      timestamp: now
+    }));
+  }
+
+  return { success: true };
 }
 
 // Generate share card data (for frontend to render image)
@@ -369,7 +593,8 @@ export default {
   parseReferralCode,
   recordReferralAttribution,
   checkAndAwardMilestoneRewards,
+  resolveReferrerId,
   getTopRecruiters,
   getUserReferralStats,
-  generateShareCardData,
+  generateShareCardData, triggerHeraldsHorn,
 };

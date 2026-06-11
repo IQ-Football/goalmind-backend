@@ -1,6 +1,7 @@
 import { authenticate } from '../middleware/auth.js';
 import { getDailyBattleStats } from '../services/battleService.js';
 import { getUserReferralStats } from '../services/referralService.js';
+import { convertTokensToLegacyXP } from '../services/legacyXPService.js';
 
 const userRoutes = async (fastify, options) => {
   // All routes require authentication
@@ -14,7 +15,8 @@ const userRoutes = async (fastify, options) => {
       const result = await fastify.db.query(
         `SELECT u.id, u.username, u.email, u.tribe_id, u.elo, u.battles_played, 
                 u.battles_won, u.last_active_at, u.created_at,
-                u.is_pro, u.gems, u.pro_expires_at, u.battle_tokens, u.last_token_refill_at,
+                u.is_pro, u.goal_tokens, u.gems, u.pro_expires_at, u.battle_tokens, u.last_token_refill_at,
+                u.legacy_xp, u.arena_level,
                 t.name as tribe_name, t.slug as tribe_slug, t.type as tribe_type,
                 t.primary_color, t.secondary_color,
                 tm.tier, tm.contribution_points
@@ -69,6 +71,41 @@ const userRoutes = async (fastify, options) => {
     }
   });
 
+  // POST /users/me/legacy-conversion - Convert GoalTokens to Legacy XP
+  fastify.post('/me/legacy-conversion', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['amount'],
+        properties: {
+          amount: { type: 'integer', minimum: 1 }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const userId = request.user.id;
+    const { amount } = request.body;
+
+    const result = await convertTokensToLegacyXP(fastify, userId, amount);
+
+    if (!result.success) {
+      return reply.status(400).send({
+        success: false,
+        error: {
+          code: 'CONVERSION_FAILED',
+          message: result.error,
+          requestId: request.id
+        }
+      });
+    }
+
+    return reply.send({
+      success: true,
+      data: result,
+      meta: { timestamp: new Date().toISOString(), requestId: request.id }
+    });
+  });
+
   // GET /users/me/referrals - Get user's referral stats
   fastify.get('/me/referrals', async (request, reply) => {
     const userId = request.user.id;
@@ -94,7 +131,7 @@ const userRoutes = async (fastify, options) => {
 
     try {
       const result = await fastify.db.query(
-        'SELECT gems, battle_tokens, is_pro FROM users WHERE id = $1',
+        'SELECT goal_tokens, gems, battle_tokens, is_pro FROM users WHERE id = $1',
         [userId]
       );
 
@@ -108,7 +145,8 @@ const userRoutes = async (fastify, options) => {
       return reply.send({
         success: true,
         data: {
-          goalTokens: result.rows[0].gems,
+          goalTokens: result.rows[0].goal_tokens,
+          gems: result.rows[0].gems,
           battleTokens: result.rows[0].battle_tokens,
           isPro: result.rows[0].is_pro,
         },

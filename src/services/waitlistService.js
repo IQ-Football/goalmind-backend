@@ -6,23 +6,7 @@
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { awardBadge, awardBadgeWithTribeCap, FOUNDING_GENERAL_ID, FOUNDING_THRESHOLD, checkAndAward25kSurgeBadge } from './achievementService.js';
-import { recordReferralAttribution, checkAndAwardMilestoneRewards } from './referralService.js';
-
-// Big 7 Partner Codes Mapping
-const PARTNER_CODES = {
-  'GM_ORP': '1f37663a-af6f-43a3-8aff-b308b78bb8dd', // Orlando Pirates
-  'GM_AHL': '92bb68bb-dd1a-4e3f-b9a2-4c795ec8d219', // Al Ahly
-  'GM_ZAM': 'd1acfa09-485d-4a90-b39f-4c2745820974', // Zamalek
-  'GM_SIM': 'b9d9fc32-15e5-4221-be61-4231a6e05671', // Simba SC
-  'GM_TPM': '3831ea9a-4156-4943-8746-b25d86fd41c9', // TP Mazembe
-  'GM_KZC': 'bbe8ff8f-e246-4e31-b46d-cfc7fe93326e', // Kaizer Chiefs
-  'GM_YAN': 'c7d324cf-2419-4daa-85a1-dd3dd136f297', // Young Africans SC
-  'GM_RCA': '3c797d04-188e-4688-88a3-6361f9eaa028', // Raja Casablanca
-  'GM_MSD': '418514fd-8761-4a87-9d28-08400a7efb66', // Mamelodi Sundowns
-  'GM_EST': '28761216-5166-4ae2-acd7-340fa44d39e7', // Espérance de Tunis
-};
-
-const PARTNER_SYSTEM_USER_ID = '00000000-0000-4000-a000-000000000000';
+import { recordReferralAttribution, checkAndAwardMilestoneRewards, resolveReferrerId, PARTNER_CODES, PARTNER_SYSTEM_USER_ID } from './referralService.js';
 
 // Generate a unique referral code for a new user
 function generateReferralCode(userId, tribeId) {
@@ -78,25 +62,8 @@ export async function registerWaitlistSignup(fastify, { name, email, tribeId, re
     let effectiveTribeId = tribeId;
 
     // Check referral code validity (if provided) and find referrer
-    let referrerId = null;
-    if (referralCode) {
-      const upperCode = referralCode.toUpperCase();
-      // Support both base partner codes and campaign-specific variants (e.g., GM_KZC and GM_KZC_500)
-      const basePartnerCode = Object.keys(PARTNER_CODES).find(code => upperCode.startsWith(code));
-      
-      if (basePartnerCode) {
-        referrerId = PARTNER_SYSTEM_USER_ID;
-        effectiveTribeId = PARTNER_CODES[basePartnerCode];
-      } else {
-        const referrerResult = await fastify.db.query(
-          'SELECT id, tribe_id FROM users WHERE referral_code = $1',
-          [upperCode]
-        );
-        if (referrerResult.rows.length > 0) {
-          referrerId = referrerResult.rows[0].id;
-        }
-      }
-    }
+    const { referrerId, effectiveTribeId: refTribeId } = await resolveReferrerId(fastify, referralCode);
+    if (refTribeId) effectiveTribeId = refTribeId;
 
     if (effectiveTribeId) {
       const tribeResult = await fastify.db.query(
@@ -114,7 +81,7 @@ export async function registerWaitlistSignup(fastify, { name, email, tribeId, re
     const passwordHash = bcrypt.hashSync(tempPassword, 10);
 
     // Create user (username defaults to part of email if name not provided)
-    const defaultUsername = name ? name.trim() : email.split('@')[0];
+    let defaultUsername = name ? name.trim() : email.split('@')[0];
     
     // Determine cohort (first 500: Vanguard 500, next 500: Centurion)
     const countRes = await fastify.db.query('SELECT COUNT(*) FROM users');
@@ -126,12 +93,28 @@ export async function registerWaitlistSignup(fastify, { name, email, tribeId, re
       cohort = 'centurion';
     }
 
-    const userResult = await fastify.db.query(
-      `INSERT INTO users (username, email, password_hash, tribe_id, referral_code, referred_by, elo, last_active_at, cohort)
-       VALUES ($1, $2, $3, $4, $5, $6, 1000, NOW(), $7)
-       RETURNING id, username, email, referral_code`,
-      [defaultUsername, email.toLowerCase(), passwordHash, tribe ? tribe.id : null, null, referrerId, cohort]
-    );
+    let userResult;
+    try {
+      userResult = await fastify.db.query(
+        `INSERT INTO users (username, email, password_hash, tribe_id, referral_code, referred_by, elo, last_active_at, cohort)
+         VALUES ($1, $2, $3, $4, $5, $6, 1000, NOW(), $7)
+         RETURNING id, username, email, referral_code`,
+        [defaultUsername, email.toLowerCase(), passwordHash, tribe ? tribe.id : null, null, referrerId, cohort]
+      );
+    } catch (dbErr) {
+      // Handle duplicate username by appending a suffix
+      if (dbErr.code === '23505' && dbErr.constraint === 'users_username_key') {
+        defaultUsername = `${defaultUsername}_${crypto.randomInt(1000, 9999)}`;
+        userResult = await fastify.db.query(
+          `INSERT INTO users (username, email, password_hash, tribe_id, referral_code, referred_by, elo, last_active_at, cohort)
+           VALUES ($1, $2, $3, $4, $5, $6, 1000, NOW(), $7)
+           RETURNING id, username, email, referral_code`,
+          [defaultUsername, email.toLowerCase(), passwordHash, tribe ? tribe.id : null, null, referrerId, cohort]
+        );
+      } else {
+        throw dbErr;
+      }
+    }
     const user = userResult.rows[0];
 
     // Award 25k Surge badge if applicable
@@ -225,10 +208,17 @@ export async function completeWaitlistOnboarding(fastify, { email, username, tri
     const tribe = tribeResult.rows[0];
 
     // Update user
-    await fastify.db.query(
-      'UPDATE users SET username = $1, tribe_id = $2 WHERE id = $3',
-      [username.trim(), tribe.id, user.id]
-    );
+    try {
+      await fastify.db.query(
+        'UPDATE users SET username = $1, tribe_id = $2 WHERE id = $3',
+        [username.trim(), tribe.id, user.id]
+      );
+    } catch (err) {
+      if (err.code === '23505' && err.constraint === 'users_username_key') {
+        return { error: 'USERNAME_TAKEN', message: 'Username is already in use' };
+      }
+      throw err;
+    }
 
     // If tribe changed or was null, update tribe stats
     if (user.tribe_id !== tribe.id) {

@@ -3,11 +3,55 @@ import { getTribeIdentity, updateTribeIdentity } from '../services/tribeIdentity
 import { getWarRoomData } from '../services/tribeWarRoomService.js';
 
 const tribeRoutes = async (fastify, options) => {
+  // GET /tribes/config - Unified tribe configuration for frontends
+  fastify.get('/config', async (request, reply) => {
+    const cacheKey = 'cache:tribes:config';
+    try {
+      const cached = await fastify.redis.get(cacheKey);
+      if (cached) {
+        return reply.send(JSON.parse(cached));
+      }
+
+      const result = await fastify.db.query(`
+        SELECT id, name, slug, type, logo_url, primary_color, secondary_color, 
+               region, is_super_tribe, motto, banner_url
+        FROM tribes
+        ORDER BY is_super_tribe DESC, name ASC
+      `);
+
+      const response = {
+        success: true,
+        data: {
+          tribes: result.rows,
+          superTribes: result.rows.filter(t => t.is_super_tribe),
+          categories: ['club', 'national', 'university'],
+          regions: [...new Set(result.rows.map(t => t.region))],
+          lastUpdated: new Date().toISOString()
+        }
+      };
+
+      await fastify.redis.set(cacheKey, JSON.stringify(response), 'EX', 300);
+      return reply.send(response);
+    } catch (err) {
+      fastify.log.error(err);
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'INTERNAL_ERROR', message: 'Failed to fetch tribe configuration' }
+      });
+    }
+  });
+
   // GET /tribes - List all tribes
   fastify.get('/', async (request, reply) => {
     const { type, sort = 'member_count' } = request.query;
+    const cacheKey = `cache:tribes:list:${type || 'all'}:${sort}`;
 
     try {
+      const cached = await fastify.redis.get(cacheKey);
+      if (cached) {
+        return reply.send(JSON.parse(cached));
+      }
+
       let query = `
         SELECT t.id, t.name, t.type, t.slug, t.logo_url, 
                t.primary_color, t.secondary_color, t.total_points, t.member_count,
@@ -22,16 +66,16 @@ const tribeRoutes = async (fastify, options) => {
       }
 
       if (sort === 'points') {
-        query += params.length ? ' ORDER BY t.total_points DESC' : ' ORDER BY t.total_points DESC';
+        query += ' ORDER BY t.total_points DESC';
       } else if (sort === 'name') {
-        query += params.length ? ' ORDER BY t.name ASC' : ' ORDER BY t.name ASC';
+        query += ' ORDER BY t.name ASC';
       } else {
-        query += params.length ? ' ORDER BY t.member_count DESC' : ' ORDER BY t.member_count DESC';
+        query += ' ORDER BY t.member_count DESC';
       }
 
       const result = await fastify.db.query(query, params);
 
-      return reply.send({
+      const response = {
         success: true,
         data: {
           tribes: result.rows,
@@ -41,7 +85,10 @@ const tribeRoutes = async (fastify, options) => {
           timestamp: new Date().toISOString(),
           requestId: request.id,
         },
-      });
+      };
+
+      await fastify.redis.set(cacheKey, JSON.stringify(response), 'EX', 60);
+      return reply.send(response);
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({
@@ -196,9 +243,16 @@ const tribeRoutes = async (fastify, options) => {
   // GET /tribes/:slug/stats - Tribe comprehensive statistics
   fastify.get('/:slug/stats', async (request, reply) => {
     const { slug } = request.params;
+    const cacheKey = `cache:tribes:stats:${slug}`;
 
     try {
-      // 1. Fetch tribe basic info
+      // 1. Try cache
+      const cached = await fastify.redis.get(cacheKey);
+      if (cached) {
+        return reply.send(JSON.parse(cached));
+      }
+
+      // 2. Fetch tribe basic info
       const tribeResult = await fastify.db.query(
         'SELECT id, name, slug, member_count, avg_fan_iq, region, is_super_tribe FROM tribes WHERE slug = $1',
         [slug]
@@ -266,7 +320,7 @@ const tribeRoutes = async (fastify, options) => {
 
       const continentalRank = rankResult.rows.findIndex(r => r.id === tribe.id) + 1;
 
-      return reply.send({
+      const response = {
         success: true,
         data: {
           tribe: {
@@ -293,7 +347,10 @@ const tribeRoutes = async (fastify, options) => {
           timestamp: new Date().toISOString(),
           requestId: request.id,
         },
-      });
+      };
+
+      await fastify.redis.set(cacheKey, JSON.stringify(response), 'EX', 120);
+      return reply.send(response);
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({
@@ -310,8 +367,14 @@ const tribeRoutes = async (fastify, options) => {
   // GET /tribes/:id - Tribe details + members
   fastify.get('/:id', async (request, reply) => {
     const { id } = request.params;
+    const cacheKey = `cache:tribes:details:${id}`;
 
     try {
+      const cached = await fastify.redis.get(cacheKey);
+      if (cached) {
+        return reply.send(JSON.parse(cached));
+      }
+
       const tribeResult = await fastify.db.query(
         `SELECT t.*, 
                 (SELECT COUNT(*) FROM users WHERE tribe_id = t.id AND last_active_at > NOW() - INTERVAL '7 days') as active_members_7d
@@ -346,7 +409,7 @@ const tribeRoutes = async (fastify, options) => {
       // Get tribe's global rank
       const tribeRank = await fastify.redis.zrevrank('leaderboard:tribal', id);
 
-      return reply.send({
+      const response = {
         success: true,
         data: {
           tribe,
@@ -357,7 +420,10 @@ const tribeRoutes = async (fastify, options) => {
           timestamp: new Date().toISOString(),
           requestId: request.id,
         },
-      });
+      };
+
+      await fastify.redis.set(cacheKey, JSON.stringify(response), 'EX', 60);
+      return reply.send(response);
     } catch (err) {
       fastify.log.error(err);
       return reply.status(500).send({

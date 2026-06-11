@@ -96,6 +96,13 @@ export function isTribeWarActive(tribe1Id, tribe2Id) {
  * Get tribe war leaderboard (rivalry battles won)
  */
 export async function getTribeWarLeaderboard(fastify, limit = 50) {
+  const cacheKey = `cache:leaderboard:tribe_war:${limit}`;
+  
+  if (fastify?.redis) {
+    const cached = await fastify.redis.get(cacheKey);
+    if (cached) return JSON.parse(cached);
+  }
+
   try {
     const result = await fastify.db.query(
       `SELECT 
@@ -121,7 +128,13 @@ export async function getTribeWarLeaderboard(fastify, limit = 50) {
       [limit]
     );
     
-    return result.rows;
+    const leaderboard = result.rows;
+
+    if (fastify?.redis) {
+      await fastify.redis.setex(cacheKey, 60, JSON.stringify(leaderboard)); // Cache for 60s
+    }
+
+    return leaderboard;
   } catch (err) {
     fastify.log.error('Error fetching tribe war leaderboard:', err);
     return [];

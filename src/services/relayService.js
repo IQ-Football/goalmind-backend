@@ -2,6 +2,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { finalizeRelayTournament } from './rewardService.js';
 import { broadcastTournamentUpdate } from './tournamentLeaderboardService.js';
 
+import { hasAchievement, FOUNDING_GENERAL_ID } from './achievementService.js';
+
 export const RELAY_STATES = {
   LOBBY: 'lobby',
   OPENING: 'opening',
@@ -20,6 +22,14 @@ function relayKey(relayId) { return `relay:${relayId}:state`; }
 async function getRelayState(relayId, fastify) {
   const data = await fastify.redis.hgetall(relayKey(relayId));
   if (!data || Object.keys(data).length === 0) return null;
+
+  const pipeline = fastify.redis.pipeline();
+  pipeline.get(`relay:${relayId}:warcry:${data.tribeA_id}`);
+  pipeline.get(`relay:${relayId}:warcry:${data.tribeB_id}`);
+  const [resA, resB] = await pipeline.exec();
+  const warcryA = resA[1];
+  const warcryB = resB[1];
+
   return {
     id: relayId,
     tribeA_id: data.tribeA_id,
@@ -41,6 +51,8 @@ async function getRelayState(relayId, fastify) {
     tribeB_online: JSON.parse(data.tribeB_online || '[]'),
     tribeA_correct_total: parseInt(data.tribeA_correct_total || '0'),
     tribeB_correct_total: parseInt(data.tribeB_correct_total || '0'),
+    tribeA_warcry: parseInt(warcryA || '0'),
+    tribeB_warcry: parseInt(warcryB || '0'),
     active_tribe: data.active_tribe || 'A',
     active_player_index: parseInt(data.active_player_index || '0'),
     startTime: parseInt(data.startTime || '0'),
@@ -145,16 +157,19 @@ export function setupRelayHandlers(relayNamespace, fastify) {
         }
 
         // Handle disconnection during turn
-        const activeParticipants = state.active_tribe === 'A' ? state.tribeA_participants : state.tribeB_participants;
-        if (socket.userId === activeParticipants[state.active_player_index] && state.status === RELAY_STATES.SEQUENCE) {
+        const isPlayerA = state.tribeA_participants[state.tribeA_active_player_index] === socket.userId;
+        const isPlayerB = state.tribeB_participants[state.tribeB_active_player_index] === socket.userId;
+
+        if ((isPlayerA || isPlayerB) && state.status === RELAY_STATES.SEQUENCE) {
+          const tribe = isPlayerA ? 'A' : 'B';
           // Set disconnection timeout
           setTimeout(async () => {
             const currentState = await getRelayState(socket.relayId, fastify);
             if (!currentState) return;
-            const currentOnline = currentState.active_tribe === 'A' ? currentState.tribeA_online : currentState.tribeB_online;
+            const currentOnline = tribe === 'A' ? currentState.tribeA_online : currentState.tribeB_online;
             if (!currentOnline.includes(socket.userId)) {
-              fastify.log.info(`Player ${socket.userId} failed to reconnect. Force-passing baton.`);
-              await handleBatonPass(socket.relayId, currentState, relayNamespace, fastify);
+              fastify.log.info(`Player ${socket.userId} (Tribe ${tribe}) failed to reconnect. Force-passing baton.`);
+              await handleBatonPass(socket.relayId, tribe, currentState, relayNamespace, fastify);
             }
           }, RECONNECTION_WINDOW_MS);
         }
@@ -188,6 +203,22 @@ export function setupRelayHandlers(relayNamespace, fastify) {
       relayNamespace.to(`relay:${relayId}`).emit('relay:spirit_update', {
         tribeId,
         spirit: newSpirit
+      });
+    });
+
+    socket.on('relay:warcry', async (data) => {
+      const { relayId, tribeId } = data;
+      if (!relayId || !tribeId) return;
+      
+      const warcryKey = `relay:${relayId}:warcry:${tribeId}`;
+      const intensity = data.intensity || 1;
+      const newWarcryTotal = await fastify.redis.incrby(warcryKey, intensity);
+      
+      // High-frequency volatile pulse for the TugOfWarBar animation
+      relayNamespace.to(`relay:${relayId}`).volatile.emit('relay:warcry_pulse', {
+        tribeId,
+        intensity,
+        total: newWarcryTotal
       });
     });
 
@@ -243,9 +274,14 @@ export function setupRelayHandlers(relayNamespace, fastify) {
         await updateRelayField(relayId, 'tribeB_current_round', state.tribeB_current_round, fastify);
       }
 
+      const latestWarcryA = await fastify.redis.get(`relay:${relayId}:warcry:${state.tribeA_id}`);
+      const latestWarcryB = await fastify.redis.get(`relay:${relayId}:warcry:${state.tribeB_id}`);
+
       relayNamespace.to(`relay:${relayId}`).emit('relay:progress', {
         tribeA_score: state.tribeA_score,
         tribeB_score: state.tribeB_score,
+        tribeA_warcry: parseInt(latestWarcryA || '0'),
+        tribeB_warcry: parseInt(latestWarcryB || '0'),
         tribeA_current_round: state.tribeA_current_round,
         tribeB_current_round: state.tribeB_current_round,
         tribeA_active_player_index: state.tribeA_active_player_index,
@@ -292,11 +328,23 @@ async function handleBatonPass(relayId, tribe, state, namespace, fastify) {
       await updateRelayField(relayId, 'tribeB_score', currentState.tribeB_score, fastify);
     }
 
+    // Add WarCry Bonuses (1 point per 50 intensity)
+    const warcryBonusA = Math.floor(currentState.tribeA_warcry / 50);
+    const warcryBonusB = Math.floor(currentState.tribeB_warcry / 50);
+    
+    currentState.tribeA_score += warcryBonusA;
+    currentState.tribeB_score += warcryBonusB;
+    
+    await updateRelayField(relayId, 'tribeA_score', currentState.tribeA_score, fastify);
+    await updateRelayField(relayId, 'tribeB_score', currentState.tribeB_score, fastify);
+
     state.status = RELAY_STATES.SCORING;
     await updateRelayField(relayId, 'status', state.status, fastify);
     namespace.to(`relay:${relayId}`).emit('relay:scoring', {
       tribeA_score: currentState.tribeA_score,
-      tribeB_score: currentState.tribeB_score
+      tribeB_score: currentState.tribeB_score,
+      warcryBonusA,
+      warcryBonusB
     });
     
     setTimeout(async () => {
@@ -330,11 +378,18 @@ async function handleBatonPass(relayId, tribe, state, namespace, fastify) {
          fastify.log.error('Error saving relay match to DB:', err);
        }
 
-       namespace.to(`relay:${relayId}`).emit('relay:end', {
-         winner,
-         tribeA_score: currentState.tribeA_score,
-         tribeB_score: currentState.tribeB_score
-       });
+    namespace.to(`relay:${relayId}`).emit('relay:end', {
+      winner,
+      tribeA_score: currentState.tribeA_score,
+      tribeB_score: currentState.tribeB_score
+    });
+
+    // Alias for task compliance
+    namespace.to(`relay:${relayId}`).emit('match_end', {
+      winner,
+      tribeA_score: currentState.tribeA_score,
+      tribeB_score: currentState.tribeB_score
+    });
 
        // Finalize rewards and Hall of Generals induction
        const winnerParticipants = winner === 'A' ? currentState.tribeA_participants : (winner === 'B' ? currentState.tribeB_participants : []);
@@ -359,15 +414,22 @@ async function handleBatonPass(relayId, tribe, state, namespace, fastify) {
 async function getTribeRelayTeam(fastify, tribeId) {
   // Top 3 by IQ
   const topIQ = await fastify.db.query(
-    'SELECT id, elo, contribution_points FROM users WHERE tribe_id = $1 ORDER BY elo DESC LIMIT 3',
-    [tribeId]
+    `SELECT u.id, u.elo, u.contribution_points,
+            EXISTS(SELECT 1 FROM user_achievements ua WHERE ua.user_id = u.id AND ua.achievement_id = $2) as has_badge
+     FROM users u 
+     WHERE u.tribe_id = $1 
+     ORDER BY u.elo DESC LIMIT 3`,
+    [tribeId, FOUNDING_GENERAL_ID]
   );
   
   // The remaining 2 should be elected. For now, we take the next 2 highest IQ as fallback
-  // In a real scenario, we'd query a 'relay_nominations' or 'tribe_votes' table
   const elected = await fastify.db.query(
-    'SELECT id, elo, contribution_points FROM users WHERE tribe_id = $1 AND id NOT IN ($2, $3, $4) ORDER BY elo DESC LIMIT 2',
-    [tribeId, topIQ.rows[0]?.id, topIQ.rows[1]?.id, topIQ.rows[2]?.id]
+    `SELECT u.id, u.elo, u.contribution_points,
+            EXISTS(SELECT 1 FROM user_achievements ua WHERE ua.user_id = u.id AND ua.achievement_id = $2) as has_badge
+     FROM users u 
+     WHERE u.tribe_id = $1 AND u.id NOT IN ($3, $4, $5) 
+     ORDER BY u.elo DESC LIMIT 2`,
+    [tribeId, FOUNDING_GENERAL_ID, topIQ.rows[0]?.id || uuidv4(), topIQ.rows[1]?.id || uuidv4(), topIQ.rows[2]?.id || uuidv4()]
   );
 
   const team = [...topIQ.rows, ...elected.rows];
@@ -377,14 +439,17 @@ async function getTribeRelayTeam(fastify, tribeId) {
   
   // Substitutes (Next 2)
   const subs = await fastify.db.query(
-    'SELECT id FROM users WHERE tribe_id = $1 AND id NOT IN (SELECT id FROM users WHERE tribe_id = $1 ORDER BY elo DESC LIMIT 5) ORDER BY elo DESC LIMIT 2',
+    `SELECT id FROM users 
+     WHERE tribe_id = $1 
+     AND id NOT IN (SELECT id FROM users WHERE tribe_id = $1 ORDER BY elo DESC LIMIT 5) 
+     ORDER BY elo DESC LIMIT 2`,
     [tribeId]
   );
 
   return {
     participants: team.map(u => u.id),
     substitutes: subs.rows.map(u => u.id),
-    hasGeneral: team.some(u => u.contribution_points >= 15000),
+    hasGeneral: team.some(u => u.has_badge || u.contribution_points >= 15000),
     captain: team[0]?.id
   };
 }
@@ -417,6 +482,17 @@ export async function createRelayMatch(fastify, tribeA_id, tribeB_id) {
     startTime: Date.now(),
   };
   await setRelayState(relayId, state, fastify);
+
+  // P0: Sync initial match state to PostgreSQL for leaderboard tracking
+  try {
+    await fastify.db.query(
+      'INSERT INTO relay_matches (id, tribe_a_id, tribe_b_id, status) VALUES ($1, $2, $3, $4)',
+      [relayId, tribeA_id, tribeB_id, RELAY_STATES.LOBBY]
+    );
+  } catch (err) {
+    fastify.log.error({ err, relayId }, 'Error persisting relay match to DB');
+  }
+
   return relayId;
 }
 
@@ -447,6 +523,11 @@ export async function startRelayMatch(relayId, fastify, namespace) {
   await updateRelayField(relayId, 'tribeB_participants', finalParticipantsB, fastify);
   await updateRelayField(relayId, 'status', RELAY_STATES.OPENING, fastify);
   
+  // Sync status to DB
+  fastify.db.query('UPDATE relay_matches SET status = $1 WHERE id = $2', [RELAY_STATES.OPENING, relayId]).catch(err => {
+    fastify.log.error({ err, relayId }, 'Error updating relay status in DB');
+  });
+  
   namespace.to(`relay:${relayId}`).emit('relay:opening', { 
     relayId,
     tribeA_participants: finalParticipantsA,
@@ -455,6 +536,13 @@ export async function startRelayMatch(relayId, fastify, namespace) {
 
   setTimeout(async () => {
     await updateRelayField(relayId, 'status', RELAY_STATES.SEQUENCE, fastify);
+    
+    // Sync status to DB
+    fastify.db.query('UPDATE relay_matches SET status = $1 WHERE id = $2', [RELAY_STATES.SEQUENCE, relayId]).catch(err => {
+      fastify.log.error({ err, relayId }, 'Error updating relay status in DB');
+    });
+
     namespace.to(`relay:${relayId}`).emit('relay:start', { relayId });
+    namespace.to(`relay:${relayId}`).emit('match_start', { relayId });
   }, 10000);
 }

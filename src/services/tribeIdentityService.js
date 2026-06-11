@@ -1,4 +1,4 @@
-import { hasAchievement, awardFoundingGeneral, awardFoundingCenturion, FOUNDING_CAPTAIN_ID, FOUNDING_GENERAL_ID, FOUNDING_CENTURION_ID } from './achievementService.js';
+import { hasAchievement, FOUNDING_CAPTAIN_ID, TRIBE_COMMANDER_ID, awardFoundingGeneral, awardFoundingCenturion, awardTribeCommander, checkAndAward25kSurgeBadge } from './achievementService.js';
 
 /**
  * Fetch tribal visual configuration.
@@ -125,17 +125,31 @@ export async function processTribalCatchup(fastify, { userId, tribeId }) {
       fastify.log.info({ userId, tribeId }, 'Zero-Breaker awarded');
     }
 
-    // 1.5 Founding General Logic (for the first 10)
+    // 1.5 Founding General & Centurion Logic
     if (tribeInfo.member_count <= 10) {
       await awardFoundingGeneral(fastify, userId);
-      fastify.log.info({ userId, tribeId }, 'Founding General awarded automatically during catchup');
+    } else if (tribeInfo.member_count <= 100) {
+      await awardFoundingCenturion(fastify, userId);
     }
 
-    // 1.55 Founding Centurion Logic (for members 11-100)
-    if (tribeInfo.member_count > 10 && tribeInfo.member_count <= 100) {
-      await awardFoundingCenturion(fastify, userId);
-      fastify.log.info({ userId, tribeId }, 'Founding Centurion awarded automatically during catchup');
+    // 1.55 Tribe Commander (Imperial Commander) Logic at 1,000 members
+    if (tribeInfo.member_count >= 1000) {
+      // We check if any leader in this tribe already has the badge to avoid redundant calls
+      const leaderBadgeCheck = await fastify.db.query(
+        `SELECT 1 FROM user_achievements ua
+         JOIN users u ON ua.user_id = u.id
+         WHERE u.tribe_id = $1 AND ua.achievement_id = $2`,
+        [tribeId, TRIBE_COMMANDER_ID]
+      );
+
+      if (leaderBadgeCheck.rows.length === 0) {
+        await awardTribeCommander(fastify, tribeId);
+        fastify.log.info({ tribeId, memberCount: tribeInfo.member_count }, 'Tribe Commander milestone reached and leader awarded');
+      }
     }
+
+    // 1.6 Global Surge Badge Logic
+    await checkAndAward25kSurgeBadge(fastify, userId);
 
     // 2. Vanguard 100 Logic (Multiplier flag and Power Point Airdrop)
     if (laggardSlugs.includes(tribeInfo.slug) && tribeInfo.member_count <= 100) {

@@ -40,7 +40,7 @@ export function setupMatchmakingHandlers(matchmakingNamespace, fastify) {
     // matchmaking:join - Enter queue
     socket.on('matchmaking:join', async (data) => {
       try {
-        const { elo, tribeId } = data;
+        const { elo, tribeId, sector } = data;
         
         if (!socket.userId) {
           socket.emit('matchmaking:error', {
@@ -79,6 +79,7 @@ export function setupMatchmakingHandlers(matchmakingNamespace, fastify) {
           socketId: socket.id,
           elo,
           tribeId,
+          sector: sector || '',
           joinedAt: Date.now(),
           cohort: cohort || '',
         };
@@ -92,12 +93,13 @@ export function setupMatchmakingHandlers(matchmakingNamespace, fastify) {
           userId: socket.userId,
           elo,
           position,
+          sector
         });
 
         // Try to find a match
         await findMatch(socket.userId, elo, fastify, matchmakingNamespace);
 
-        fastify.log.info(`User ${socket.userId} joined matchmaking with Elo ${elo}`);
+        fastify.log.info(`User ${socket.userId} joined matchmaking with Elo ${elo} in sector ${sector}`);
       } catch (err) {
         fastify.log.error(err);
         socket.emit('matchmaking:error', {
@@ -185,16 +187,42 @@ async function findMatch(userId, elo, fastify, namespace) {
   // Filter out self
   let eligibleOpponents = opponents.filter(oppId => oppId !== userId);
 
+  // Implement Sector-based matching for Imperial Conflict
+  // Users in a sector should ideally match with others in the SAME sector
+  if (queueEntry.sector) {
+    const pipeline = fastify.redis.pipeline();
+    eligibleOpponents.forEach(oppId => {
+      pipeline.hget(`matchmaking:entry:${oppId}`, 'sector');
+    });
+    const sectorResults = await pipeline.exec();
+    
+    const opponentSectors = eligibleOpponents.map((oppId, idx) => ({
+      id: oppId,
+      sector: sectorResults[idx][1]
+    }));
+    
+    const sameSectorOpponents = opponentSectors
+      .filter(opp => opp.sector === queueEntry.sector)
+      .map(opp => opp.id);
+      
+    if (sameSectorOpponents.length > 0) {
+      eligibleOpponents = sameSectorOpponents;
+    }
+  }
+
   // Implement Priority Pool logic for Vanguard 500
-  // Spec: Vanguard 500 users get priority access for 5 seconds before falling back to the standard pool.
   if (queueEntry.cohort === 'vanguard_500' && timeInQueue < 5000) {
-    // Only match with other Vanguard 500 users in the first 5 seconds
-    const opponentCohorts = await Promise.all(
-      eligibleOpponents.map(async (oppId) => {
-        const cohort = await fastify.redis.hget(`matchmaking:entry:${oppId}`, 'cohort');
-        return { id: oppId, cohort };
-      })
-    );
+    const pipeline = fastify.redis.pipeline();
+    eligibleOpponents.forEach(oppId => {
+      pipeline.hget(`matchmaking:entry:${oppId}`, 'cohort');
+    });
+    const cohortResults = await pipeline.exec();
+    
+    const opponentCohorts = eligibleOpponents.map((oppId, idx) => ({
+      id: oppId,
+      cohort: cohortResults[idx][1]
+    }));
+
     eligibleOpponents = opponentCohorts
       .filter(opp => opp.cohort === 'vanguard_500')
       .map(opp => opp.id);
@@ -226,9 +254,9 @@ async function findMatch(userId, elo, fastify, namespace) {
     // Create battle in database
     const battleId = uuidv4();
     await fastify.db.query(
-      `INSERT INTO battles (id, player1_id, player2_id, status) 
-       VALUES ($1, $2, $3, $4)`,
-      [battleId, userId, opponentId, BATTLE_STATES.PENDING]
+      `INSERT INTO battles (id, player1_id, player2_id, status, sector) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      [battleId, userId, opponentId, BATTLE_STATES.PENDING, queueEntry.sector]
     );
 
     // Get opponent info
@@ -309,12 +337,18 @@ export function startMatchmakingPolling(fastify, namespace) {
       // Get all users currently in the queue from Redis
       const usersInQueue = await fastify.redis.zrange('matchmaking:queue', 0, -1, 'WITHSCORES');
       
+      // Optimized: use pipeline to fetch cohorts for all users in queue
+      const pipeline = fastify.redis.pipeline();
+      for (let i = 0; i < usersInQueue.length; i += 2) {
+        pipeline.hget(`matchmaking:entry:${usersInQueue[i]}`, 'cohort');
+      }
+      const cohortResults = await pipeline.exec();
+      
       const queueEntries = [];
-      // Redis returns [id1, score1, id2, score2, ...]
       for (let i = 0; i < usersInQueue.length; i += 2) {
         const userId = usersInQueue[i];
         const elo = parseInt(usersInQueue[i+1]);
-        const cohort = await fastify.redis.hget(`matchmaking:entry:${userId}`, 'cohort');
+        const cohort = cohortResults[i/2][1];
         queueEntries.push({ userId, elo, cohort });
       }
 

@@ -28,13 +28,21 @@ import governanceRoutes from './routes/governance.js';
 import statusRoutes from './routes/status.js';
 import iqProfileRoutes from './routes/iqProfile.js';
 import prestigeRoutes from './routes/prestige.js';
+import prestigeRewardRoutes from './routes/prestigeRewards.js';
+import tokenRoutes from './routes/tokens.js';
+import onboardingRoutes from './routes/onboarding.js';
 import relayRoutes from './routes/relay.js';
 import shopRoutes from './routes/shop.js';
+import discoveryRoutes from './routes/discovery.js';
+import continentalCupRoutes from './routes/continentalCup.js';
+import imperialConflictRoutes from './routes/imperialConflict.js';
 import { setupBattleHandlers } from './services/battleService.js';
 import { setupRelayHandlers } from './services/relayService.js';
+import { setupWarRoomHandlers } from './services/tribeWarRoomService.js';
 import { setupTournamentHandlers } from './services/tournamentLeaderboardService.js';
 import { setupMatchmakingHandlers, startMatchmakingPolling } from './services/matchmakingService.js';
 import { startBackgroundJobs } from './services/backgroundJobs.js';
+import { authenticate } from './middleware/auth.js';
 
 const fastify = Fastify({
   logger: {
@@ -81,9 +89,25 @@ fastify.register(dbMonitorPlugin);
 // Initialize Redis connection
 fastify.register(redisPlugin);
 
+// Decorate fastify with authentication middleware
+fastify.decorate('authenticate', authenticate);
+
+// Root route
+fastify.get('/', async (request, reply) => {
+  return { name: 'GoalMind API', version: '1.0.0', status: 'active' };
+});
+
 // Health check
 fastify.get('/health', async (request, reply) => {
-  return { status: 'ok', timestamp: new Date().toISOString() };
+  return reply.send({
+    success: true,
+    data: {
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      surgeCohort: 'Centurion Legion',
+      version: '1.2.0'
+    }
+  });
 });
 
 // API routes
@@ -107,9 +131,14 @@ await fastify.register(governanceRoutes, { prefix: '/governance' });
 await fastify.register(statusRoutes, { prefix: '/status' });
 await fastify.register(iqProfileRoutes, { prefix: '/users' });
 await fastify.register(prestigeRoutes, { prefix: '/users' });
+await fastify.register(prestigeRewardRoutes, { prefix: '/api/v1/prestige' });
+await fastify.register(tokenRoutes, { prefix: '/tokens' });
+await fastify.register(onboardingRoutes, { prefix: '/onboarding' });
 await fastify.register(relayRoutes, { prefix: '/relay' });
 await fastify.register(shopRoutes, { prefix: '/shop' });
 await fastify.register(shopRoutes, { prefix: '/payments' });
+await fastify.register(imperialConflictRoutes, { prefix: '/imperial-conflict' });
+await fastify.register(continentalCupRoutes, { prefix: '/continental-cup' });
 
 // Socket.IO setup for real-time battles
 const io = new Server(fastify.server, {
@@ -138,10 +167,15 @@ startMatchmakingPolling(fastify, matchmakingNamespace);
 // Namespace for Relay
 const relayNamespace = io.of('/relay');
 setupRelayHandlers(relayNamespace, fastify);
+fastify.decorate('relayNamespace', relayNamespace);
 
-// Namespace for Tournament
+// Namespace for Tournament Leaderboard
 const tournamentNamespace = io.of('/tournament');
 setupTournamentHandlers(tournamentNamespace, fastify);
+fastify.decorate('tournamentNamespace', tournamentNamespace);
+
+// Namespace for Tribe War Rooms
+setupWarRoomHandlers(io, fastify);
 
 fastify.log.info('Socket.IO servers initialized');
 

@@ -1,24 +1,27 @@
-import config from './src/config.js';
 import pg from 'pg';
-const { Pool } = pg;
-const pool = new Pool({
-  host: config.database.host,
-  port: config.database.port,
-  database: config.database.name,
-  user: config.database.user,
-  password: config.database.password,
-});
+const { Client } = pg;
 
-async function check() {
-  console.log('Connecting to:', config.database.name, 'on', config.database.host);
+async function main() {
+  const client = new Client({ 
+    host: 'localhost',
+    port: 5432,
+    database: 'goalmind',
+    user: 'postgres',
+    password: 'postgres'
+  });
+  await client.connect();
   try {
-    const result = await pool.query("SELECT * FROM achievements WHERE id = '550e8400-e29b-41d4-a716-446655440000'");
-    console.log('Found Founding General:', JSON.stringify(result.rows, null, 2));
-  } catch (e) {
-    console.error('Error querying achievements:', e.message);
+    const res = await client.query("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'hall_of_generals'");
+    console.log("Table exists:", res.rows.length > 0);
+    
+    if (res.rows.length > 0) {
+      const columns = await client.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'hall_of_generals'");
+      console.log("Columns:", JSON.stringify(columns.rows));
+    }
+  } catch (err) {
+    console.error(err);
+  } finally {
+    await client.end();
   }
-  const result = await pool.query("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'user_achievements'");
-  console.log('user_achievements schema:', JSON.stringify(result.rows, null, 2));
-  await pool.end();
 }
-check().catch(e => { console.error(e.message); process.exit(1); });
+main();
