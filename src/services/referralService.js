@@ -58,7 +58,7 @@ export function buildReferralLink(referralCode, tribeId) {
   
   return {
     deepLink: `${REFERRAL_PREFIX}?code=${referralCode}&tribe=${tribeId}`,
-    webLink: `${WEB_REFERRAL_BASE}/join?ref=${referralCode}&tribe=${tribeId}&utm_source=${utmSource}&utm_campaign=${utmCampaign}`,
+    webLink: `${WEB_REFERRAL_BASE}/?ref=${referralCode}&tribe=${tribeId}&utm_source=${utmSource}&utm_campaign=${utmCampaign}`,
     referralCode,
     tribeId,
   };
