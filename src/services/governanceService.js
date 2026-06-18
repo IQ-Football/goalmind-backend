@@ -72,6 +72,57 @@ export async function castVote(fastify, { proposalId, userId, optionId }) {
   }
 }
 
+export async function castSenateVote(fastify, { proposalId, userId, optionId }) {
+  const client = await fastify.db.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Check if proposal is active and is a Senate poll (tribe_id is NULL)
+    const proposalRes = await client.query(
+      'SELECT status, ends_at, tribe_id FROM tribal_proposals WHERE id = $1',
+      [proposalId]
+    );
+    const proposal = proposalRes.rows[0];
+
+    if (!proposal || proposal.tribe_id !== null) {
+      throw new Error('Not a valid Senate proposal');
+    }
+
+    if (proposal.status !== 'active' || (proposal.ends_at && new Date(proposal.ends_at) < new Date())) {
+      throw new Error('Proposal is not active');
+    }
+
+    // 2. Check if user is an Architect
+    const userRes = await client.query(
+      'SELECT is_architect FROM users WHERE id = $1',
+      [userId]
+    );
+    if (!userRes.rows[0]?.is_architect) {
+      throw new Error('Only Architects can vote in Senate polls');
+    }
+
+    // 3. Weight is fixed at 5x for Senate
+    const weight = 5.0;
+
+    // 4. Cast or Update Vote
+    await client.query(
+      `INSERT INTO tribal_votes (proposal_id, user_id, option_id, weight)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (proposal_id, user_id) 
+       DO UPDATE SET option_id = EXCLUDED.option_id, weight = EXCLUDED.weight`,
+      [proposalId, userId, optionId, weight]
+    );
+
+    await client.query('COMMIT');
+    return { success: true, weight };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 export async function getProposalResults(fastify, proposalId) {
   const results = await fastify.db.query(
     `SELECT option_id, SUM(weight) as total_weight, COUNT(*) as vote_count
@@ -86,5 +137,6 @@ export async function getProposalResults(fastify, proposalId) {
 export default {
   createProposal,
   castVote,
+  castSenateVote,
   getProposalResults
 };
