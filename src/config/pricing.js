@@ -11,13 +11,13 @@ export const REGIONAL_CONFIG = {
     symbol: 'R',
     provider: 'paystack',
     pro: {
-      monthly: { price: 19.99, label: 'R19.99' },
+      monthly: { price: 39.99 },
       annual: { price: 399.99 },
     },
     packs: {
-      impulse: { price: 9.99, label: 'R9.99' },
-      warrior: { price: 39.99, label: 'R39.99' },
-      tribe_leader: { price: 99.99, label: 'R99.99' },
+      impulse: { price: 19.99, label: 'R19.99' },
+      warrior: { price: 79.99, label: 'R79.99' },
+      tribe_leader: { price: 199.99, label: 'R199.99' },
     },
     prestige: {
       tournament_entry: { price: 9.99, label: 'R9.99' },
