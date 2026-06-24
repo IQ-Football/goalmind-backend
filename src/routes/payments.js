@@ -1,13 +1,18 @@
 import { authenticate } from '../middleware/auth.js';
+import konnect from '../services/konnectService.js';
 import {
   initializePayment,
   verifyTransaction,
   handleSuccessfulPayment,
   refundTransaction,
   verifyPaystackWebhookSignature,
+  logWebhookAttempt,
   ZAR,
   EUROPE_PRICING,
+  REGIONAL_CONFIG,
+  GOAL_TOKEN_PACKS,
   initializePaymentByCurrency,
+  PAYSTACK_PUBLIC_KEY,
 } from '../services/paymentsService.js';
 import {
   confirmMockPayment,
@@ -37,21 +42,35 @@ const paymentsRoutes = async (fastify, options) => {
       else currency = 'ZAR'; // Default for SA market
     }
 
+    const regional = REGIONAL_CONFIG[currency];
     const data = {
       currency,
-      locale: EUROPE_PRICING[currency]?.locale || ZAR.PRO_PRICE_ZAR,
+      locale: EUROPE_PRICING[currency]?.locale || (currency === 'ZAR' ? 'en-ZA' : 'en-US'),
     };
 
-    if (currency === 'ZAR') {
-      data.currencySymbol = 'R';
+    if (regional) {
+      data.currencySymbol = regional.symbol;
+      if (regional.provider === 'paystack') {
+        data.paystackPublicKey = PAYSTACK_PUBLIC_KEY;
+      }
       data.pro = {
-        monthly: { planId: 'tier_pro_monthly', price: ZAR.PRO_PRICE_ZAR, label: ZAR.format(ZAR.PRO_PRICE_ZAR), interval: 'month' },
-        annual: { planId: 'tier_pro_annual', price: ZAR.PRO_PRICE_ZAR_ANNUAL, label: ZAR.format(ZAR.PRO_PRICE_ZAR_ANNUAL), interval: 'year' },
+        monthly: { planId: 'tier_pro_monthly', price: regional.pro.monthly.price, label: `${regional.symbol}${regional.pro.monthly.price}`, interval: 'month' },
+        annual: { planId: 'tier_pro_annual', price: regional.pro.annual.price, label: `${regional.symbol}${regional.pro.annual.price}`, interval: 'year' },
       };
-      data.gemPacks = Object.entries(ZAR.GEM_PACKS).map(([key, pack]) => ({
-        packId: key, gems: pack.gems, price: pack.priceZAR, label: pack.label,
+      data.goalTokenPacks = Object.entries(regional.packs).map(([key, pack]) => ({
+        packId: `goal_tokens_${key}`, 
+        goalTokens: GOAL_TOKEN_PACKS[key].goalTokens, 
+        price: pack.price, 
+        label: pack.label,
       }));
-    } else {
+      
+      // Legacy support for ZAR gems
+      if (currency === 'ZAR') {
+        data.gemPacks = Object.entries(ZAR.GEM_PACKS).map(([key, pack]) => ({
+          packId: key, gems: pack.gems, price: pack.priceZAR, label: pack.label,
+        }));
+      }
+    } else if (EUROPE_PRICING[currency]) {
       const eu = EUROPE_PRICING[currency];
       data.currencySymbol = eu.symbol;
       data.pro = {
@@ -89,7 +108,10 @@ const paymentsRoutes = async (fastify, options) => {
       `tribe_gems_100_gbp`, `tribe_gems_500_gbp`, `tribe_gems_1200_gbp`,
       `tribe_gems_100_eur`, `tribe_gems_500_eur`, `tribe_gems_1200_eur`,
       'tribe_transfer_gbp', 'tribe_transfer_eur',
-    ];
+      'goal_tokens_impulse', 'goal_tokens_warrior', 'goal_tokens_tribe_leader',
+      'tournament_entry', 'badge_unlock', 'tcl_blood_gold',
+      'royal_vanguard', 'red_devils_elite', 'blood_and_gold', 'red_and_white'
+      ];
 
     if (!planId || !validPlans.some(p => planId === p)) {
       return reply.status(400).send({
@@ -114,12 +136,14 @@ const paymentsRoutes = async (fastify, options) => {
       });
     }
 
+    const regional = REGIONAL_CONFIG[upperCurrency];
+
     return reply.send({
       success: true,
       data: {
         ...result.data,
         currency: upperCurrency,
-        provider: upperCurrency === 'ZAR' ? 'paystack' : 'stripe',
+        provider: regional?.provider || (['GBP', 'EUR'].includes(upperCurrency) ? 'stripe' : 'paystack'),
       },
       meta: { timestamp: new Date().toISOString(), requestId: request.id },
     });
@@ -283,35 +307,100 @@ const paymentsRoutes = async (fastify, options) => {
 
     if (!verifyPaystackWebhookSignature(rawBody, signature)) {
       fastify.log.warn('Paystack webhook: invalid signature');
+      await logWebhookAttempt(fastify, {
+        provider: 'paystack',
+        eventType: request.body?.event,
+        payload: request.body,
+        status: 'error',
+        errorMessage: 'Invalid signature',
+      });
       return reply.status(401).send({ success: false, error: 'Invalid signature' });
     }
 
     const event = request.body;
+    let status = 'success';
+    let errorMessage = null;
 
-    switch (event.event) {
-      case 'charge.success': {
-        const { reference, amount, customer, metadata } = event.data;
-        const { userId, plan } = metadata || {};
+    try {
+      switch (event.event) {
+        case 'charge.success': {
+          const { reference, metadata, currency } = event.data;
+          const { userId, plan } = metadata || {};
 
-        if (userId && plan) {
-          await handleSuccessfulPayment(fastify, reference, userId, plan);
-          fastify.log.info({ reference, userId, plan }, 'Paystack webhook: payment success processed');
+          if (userId && plan) {
+            await handleSuccessfulPayment(fastify, reference, userId, plan, 'paystack', currency);
+            fastify.log.info({ reference, userId, plan, currency }, 'Paystack webhook: payment success processed');
+          } else {
+            status = 'warning';
+            errorMessage = 'Missing userId or plan in metadata';
+            fastify.log.warn({ reference, metadata }, 'Paystack webhook: missing metadata');
+          }
+          break;
         }
-        break;
-      }
 
-      case 'refund.created': {
-        const { reference } = event.data;
-        await fastify.db.query(
-          `UPDATE payments SET status = 'refunded', refunded_at = NOW() WHERE reference = $1`,
+        case 'refund.created': {
+          const { reference } = event.data;
+          await fastify.db.query(
+            `UPDATE payments SET status = 'refunded', refunded_at = NOW() WHERE reference = $1`,
+            [reference]
+          );
+          fastify.log.info({ reference }, 'Paystack webhook: refund processed');
+          break;
+        }
+
+        default:
+          fastify.log.info({ event: event.event }, 'Paystack webhook: unhandled event');
+          status = 'unhandled';
+      }
+    } catch (err) {
+      status = 'error';
+      errorMessage = err.message;
+      fastify.log.error({ err, event: event.event }, 'Paystack webhook: processing failed');
+    }
+
+    await logWebhookAttempt(fastify, {
+      provider: 'paystack',
+      eventType: event.event,
+      payload: event,
+      status,
+      errorMessage,
+    });
+
+    return reply.send({ success: true });
+  });
+
+  // ─── POST /payments/konnect/webhook ─────────────────────────────────────
+  // Konnect Tunisia webhook handler
+  fastify.post('/konnect/webhook', async (request, reply) => {
+    const { payment_id } = request.query; // Konnect often sends ID in query or body
+    const payload = request.body;
+
+    fastify.log.info({ payment_id, payload }, 'Konnect webhook received');
+
+    try {
+      // Use verification API to confirm status (most secure way if signature is unknown)
+      const verification = await konnect.verifyPayment(fastify, payment_id || payload.paymentId);
+      
+      if (verification.success && verification.status === 'completed') {
+        const reference = verification.reference;
+        
+        // Get payment details from our DB to get userId and plan
+        const paymentRecord = await fastify.db.query(
+          'SELECT user_id, plan, currency FROM payments WHERE reference = $1',
           [reference]
         );
-        fastify.log.info({ reference }, 'Paystack webhook: refund processed');
-        break;
-      }
 
-      default:
-        fastify.log.info({ event: event.event }, 'Paystack webhook: unhandled event');
+        if (paymentRecord.rows.length > 0) {
+          const { user_id: userId, plan, currency } = paymentRecord.rows[0];
+          await handleSuccessfulPayment(fastify, reference, userId, plan, 'konnect', currency);
+          fastify.log.info({ reference, userId, plan }, 'Konnect webhook: payment success processed');
+        } else {
+          fastify.log.warn({ reference }, 'Konnect webhook: payment record not found');
+        }
+      }
+    } catch (err) {
+      fastify.log.error({ err }, 'Konnect webhook processing failed');
+      return reply.status(500).send({ success: false });
     }
 
     return reply.send({ success: true });
@@ -404,8 +493,65 @@ const paymentsRoutes = async (fastify, options) => {
     }
   });
 
+  // ─── POST /payments/buy-tokens ───────────────────────────────────────────
+  // Real payment integration for GoalTokens
+  fastify.post('/buy-tokens', {
+    preHandler: [authenticate],
+    schema: {
+      body: {
+        type: 'object',
+        required: ['packId', 'currency'],
+        properties: {
+          packId: { type: 'string' },
+          currency: { type: 'string' },
+          callbackUrl: { type: 'string' },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    const { packId, currency, callbackUrl } = request.body;
+    const userId = request.user.id;
+    const upperCurrency = currency.toUpperCase();
+    
+    const planId = `goal_tokens_${packId}`;
+    
+    if (!GOAL_TOKEN_PACKS[packId]) {
+      return reply.status(400).send({
+        success: false,
+        error: { code: 'INVALID_PACK', message: 'Invalid pack ID', requestId: request.id },
+      });
+    }
+
+    const result = await initializePaymentByCurrency(fastify, {
+      userId,
+      planId,
+      currency: upperCurrency,
+      email: request.user.email,
+      callbackUrl,
+    });
+
+    if (!result.success) {
+      return reply.status(500).send({
+        success: false,
+        error: { code: 'PAYMENT_INIT_FAILED', message: result.error, requestId: request.id },
+      });
+    }
+
+    const regional = REGIONAL_CONFIG[upperCurrency];
+
+    return reply.send({
+      success: true,
+      data: {
+        ...result.data,
+        currency: upperCurrency,
+        provider: regional?.provider || (['GBP', 'EUR'].includes(upperCurrency) ? 'stripe' : 'paystack'),
+      },
+      meta: { timestamp: new Date().toISOString(), requestId: request.id },
+    });
+  });
+
   // ─── POST /payments/tokens/purchase ──────────────────────────────────────
-  // Handle the token purchase logic
+  // Handle the token purchase logic (Simulated/IAP legacy path)
   fastify.post('/tokens/purchase', {
     preHandler: [authenticate],
     schema: {
@@ -421,12 +567,6 @@ const paymentsRoutes = async (fastify, options) => {
     const userId = request.user.id;
     const { packId } = request.body;
 
-    const GOAL_TOKEN_PACKS = {
-      'impulse': { goalTokens: 50, price: 0.99 },
-      'warrior': { goalTokens: 250, price: 3.99 },
-      'tribe_leader': { goalTokens: 1000, price: 9.99 },
-    };
-
     const pack = GOAL_TOKEN_PACKS[packId];
     if (!pack) {
       return reply.status(400).send({
@@ -435,22 +575,19 @@ const paymentsRoutes = async (fastify, options) => {
       });
     }
 
-    // In a real implementation, we would verify the IAP or Stripe payment here.
-    // For now, we'll simulate a successful purchase.
-    
     const client = await fastify.db.connect();
     try {
       await client.query('BEGIN');
       
       await client.query(
-        'UPDATE users SET gems = COALESCE(gems, 0) + $1, battle_tokens = 6, last_token_refill_at = NOW() WHERE id = $2',
+        'UPDATE users SET goal_tokens = COALESCE(goal_tokens, 0) + $1, last_active_at = NOW() WHERE id = $2',
         [pack.goalTokens, userId]
       );
 
       const reference = `TOKEN_PURCHASE_${Date.now()}_${userId.slice(0, 8)}`;
       await client.query(
-        `INSERT INTO gem_transactions (user_id, amount, provider, reference, type, created_at)
-         VALUES ($1, $2, 'iap', $3, 'purchase', NOW())`,
+        `INSERT INTO gem_transactions (user_id, amount, currency, provider, reference, type, created_at)
+         VALUES ($1, $2, 'GOALTOKEN', 'iap', $3, 'purchase', NOW())`,
         [userId, pack.goalTokens, reference]
       );
 
