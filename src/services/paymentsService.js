@@ -438,6 +438,24 @@ function getAmountForPlan(planId, currency) {
   return 0;
 }
 
+export async function logWebhookAttempt(fastify, { provider, eventType, payload, status, errorMessage }) {
+  try {
+    fastify.log.info({ provider, eventType, status, errorMessage }, 'Webhook attempt logged');
+    
+    await fastify.db.query(
+      `INSERT INTO payment_webhook_logs (provider, event_type, payload, status, error_message)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [provider, eventType, JSON.stringify(payload), status, errorMessage]
+    ).catch(err => {
+      if (err.code !== '42P01') {
+        fastify.log.error('Failed to persist webhook log to DB: ' + err.message);
+      }
+    });
+  } catch (err) {
+    fastify.log.error('logWebhookAttempt unexpected error: ' + err.message);
+  }
+}
+
 export default {
   verifyPaystackWebhookSignature,
   initializePayment,
@@ -446,6 +464,7 @@ export default {
   handleSuccessfulPayment,
   refundTransaction,
   initializePaymentByCurrency,
+  logWebhookAttempt,
   ZAR,
   EUROPE_PRICING,
   REGIONAL_CONFIG,
