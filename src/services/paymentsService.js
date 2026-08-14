@@ -8,44 +8,80 @@
  */
 
 import crypto from 'crypto';
-import paystack from './paystackService.js';
-import konnect from './konnectService.js';
 import { createCheckoutSession, retrieveCheckoutSession, handleStripePaymentSuccess, createCustomerPortalSession, refundStripePayment as stripeRefund, verifyStripeWebhookSignature as stripeVerify, EUROPE_PRICING } from './stripeService.js';
-import { awardBadge, FOUNDING_PRO_ID, EKO_VANGUARD_ID, FOUNDING_GENERAL_ID, LEGACY_GENERAL_ID, EGY_ZAM_PRESTIGE_ID, EGY_AHL_PRESTIGE_ID, TUN_EST_PRESTIGE_ID, TUN_CA_PRESTIGE_ID } from './achievementService.js';
+import { awardBadge, FOUNDING_PRO_ID, EKO_VANGUARD_ID } from './achievementService.js';
 import { initializeMockPayment } from './mockPaymentsService.js';
 import { REGIONAL_CONFIG, GOAL_TOKEN_PACKS } from '../config/pricing.js';
 
 // ─── ZAR / Paystack ──────────────────────────────────────────────────────────
 
-export const PAYSTACK_PUBLIC_KEY = process.env.PAYSTACK_PUBLIC_KEY || 'pk_test_placeholder';
-
-/**
- * Log a webhook attempt for audit
- */
-export async function logWebhookAttempt(fastify, { provider, eventType, payload, status, errorMessage }) {
-  try {
-    await fastify.db.query(
-      `INSERT INTO webhook_logs (provider, event_type, payload, status, error_message)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [provider, eventType, JSON.stringify(payload), status, errorMessage]
-    );
-  } catch (err) {
-    fastify.log.error({ err }, 'Failed to log webhook attempt');
-  }
-}
+const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY || 'sk_test_placeholder';
+const PAYSTACK_API_URL = 'https://api.paystack.co';
+const PAYSTACK_WEBHOOK_SECRET = process.env.PAYSTACK_WEBHOOK_SECRET || 'whsec_placeholder';
 
 /**
  * Verify Paystack webhook signature
  */
 export function verifyPaystackWebhookSignature(payload, signature) {
-  return paystack.verifyPaystackWebhookSignature(payload, signature);
+  const hash = crypto
+    .createHmac('sha512', PAYSTACK_WEBHOOK_SECRET)
+    .update(payload)
+    .digest('hex');
+  return hash === signature;
 }
 
 /**
  * Initialize a Paystack payment (Generic for NGN, GHS, ZAR, KES)
  */
 export async function initializePaystackPayment(fastify, { userId, amount, currency, email, plan, callbackUrl }) {
-  return paystack.initializePaystackPayment(fastify, { userId, amount, currency, email, plan, callbackUrl });
+  const amountInSmallestUnit = Math.round(amount * 100);
+  const reference = `GM_${Date.now()}_${userId.slice(0, 8)}`;
+
+  try {
+    const response = await fetch(`${PAYSTACK_API_URL}/transaction/initialize`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        amount: amountInSmallestUnit,
+        currency: currency.toUpperCase(),
+        email,
+        reference,
+        callback_url: callbackUrl || `${process.env.APP_URL || 'http://localhost:8080'}/payments/callback`,
+        metadata: { userId, plan, platform: 'goalmind' },
+        channels: ['card', 'eft', 'mobile_money', 'ussd'],
+      }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.status) {
+      fastify.log.error({ data }, 'Paystack initialize failed');
+      return { success: false, error: data.message || 'Payment initialization failed' };
+    }
+
+    await fastify.db.query(
+      `INSERT INTO payments (reference, user_id, amount, currency, status, plan, provider, metadata)
+       VALUES ($1, $2, $3, $4, 'pending', $5, 'paystack', $6)
+       ON CONFLICT (reference) DO NOTHING`,
+      [reference, userId, amount, currency, plan, JSON.stringify({ provider_ref: data.data.reference })]
+    );
+
+    return {
+      success: true,
+      data: {
+        authorizationUrl: data.data.authorization_url,
+        reference: data.data.reference,
+        amount,
+        currency,
+      },
+    };
+  } catch (err) {
+    fastify.log.error({ err }, 'Paystack initialize error');
+    return { success: false, error: 'Payment service unavailable' };
+  }
 }
 
 /**
@@ -59,9 +95,36 @@ export async function initializePayment(fastify, { userId, amountInZAR, email, p
  * Verify a Paystack transaction by reference
  */
 export async function verifyTransaction(fastify, reference) {
-  return paystack.verifyTransaction(fastify, reference);
-}
+  try {
+    const response = await fetch(`${PAYSTACK_API_URL}/transaction/verify/${reference}`, {
+      headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
+    });
 
+    const data = await response.json();
+
+    if (!response.ok || !data.status) {
+      return { success: false, error: data.message || 'Verification failed' };
+    }
+
+    const tx = data.data;
+
+    return {
+      success: true,
+      data: {
+        reference: tx.reference,
+        amount: tx.amount / 100,
+        currency: tx.currency,
+        status: tx.status,
+        customerEmail: tx.customer.email,
+        paidAt: tx.paidAt,
+        metadata: tx.metadata,
+      },
+    };
+  } catch (err) {
+    fastify.log.error({ err }, 'Paystack verify error');
+    return { success: false, error: 'Verification service unavailable' };
+  }
+}
 
 /**
  * Handle successful payment - upgrade user to Pro
@@ -93,12 +156,7 @@ export async function handleSuccessfulPayment(fastify, reference, userId, plan, 
       // Prestige Monetization
       tournament_entry: { one_time: true, type: 'tournament_entry' },
       badge_unlock: { one_time: true, type: 'badge_unlock' },
-      lagos_pro_starter: { goal_tokens: 200, one_time: true, type: 'lagos_pro_starter' },
-      tcl_blood_gold: { goal_tokens: 500, one_time: true, type: 'tcl_blood_gold' },
-      royal_vanguard: { gems: 1500, one_time: true, type: 'royal_vanguard' },
-      red_devils_elite: { gems: 1500, one_time: true, type: 'red_devils_elite' },
-      blood_and_gold: { gems: 1000, one_time: true, type: 'blood_and_gold' },
-      red_and_white: { gems: 1000, one_time: true, type: 'red_and_white' }
+      lagos_pro_starter: { goal_tokens: 500, one_time: true, type: 'lagos_pro_starter' }
     };
 
     const config = planConfig[plan] || { gems: 0, goal_tokens: 0, one_time: true };
@@ -141,54 +199,15 @@ export async function handleSuccessfulPayment(fastify, reference, userId, plan, 
         // Lagos Pro Starter Logic
         await awardBadge(fastify, userId, EKO_VANGUARD_ID);
         
-        // 1.2x Multiplier for 24h + Gold Frame + Status
+        // 1.2x Multiplier for 24h
         await client.query(
           `UPDATE users SET 
-             profile_frame = 'gold_24k_lagos',
-             cohort = COALESCE(cohort, 'lagos_pro'),
              active_multiplier = 1.20,
              multiplier_expires_at = NOW() + INTERVAL '24 hours'
            WHERE id = $1`,
           [userId]
-          );
-          } else if (config.type === 'tcl_blood_gold') {
-          // "Blood and Gold" Elite Pack Logic (Tunisia)
-
-          // 1. Award Animated Frame
-          await client.query(
-          "UPDATE users SET profile_frame = 'fire_of_taraji' WHERE id = $1",
-          [userId]
-          );
-
-          // 2. Award 2x VAR Overturn Cards (Stored in metadata inventory)
-          await client.query(`
-          UPDATE users
-          SET metadata = jsonb_set(
-            COALESCE(metadata, '{}'::jsonb),
-            '{inventory,var_overturn_cards}',
-            (COALESCE(metadata->'inventory'->>'var_overturn_cards', '0')::int + 2)::text::jsonb
-          )
-          WHERE id = $1
-          `, [userId]);
-
-          // 3. Status Check: Legacy General (if user was already a Founding General)
-          const isFG = await client.query(
-          'SELECT 1 FROM user_achievements WHERE user_id = $1 AND achievement_id = $2',
-          [userId, FOUNDING_GENERAL_ID]
-          );
-
-          if (isFG.rows.length > 0) {
-            await awardBadge(fastify, userId, LEGACY_GENERAL_ID);
-          }
-          } else if (config.type === 'royal_vanguard') {
-            await awardBadge(fastify, userId, EGY_ZAM_PRESTIGE_ID);
-          } else if (config.type === 'red_devils_elite') {
-            await awardBadge(fastify, userId, EGY_AHL_PRESTIGE_ID);
-          } else if (config.type === 'blood_and_gold') {
-            await awardBadge(fastify, userId, TUN_EST_PRESTIGE_ID);
-          } else if (config.type === 'red_and_white') {
-            await awardBadge(fastify, userId, TUN_CA_PRESTIGE_ID);
-          }
+        );
+    }
 
     if (config.gems > 0) {
       await client.query(
@@ -298,8 +317,35 @@ export async function handleSuccessfulPayment(fastify, reference, userId, plan, 
 /**
  * Refund a Paystack transaction
  */
-export async function refundTransaction(fastify, reference, amount, currency = 'ZAR') {
-  return paystack.refundTransaction(fastify, reference, amount, currency);
+export async function refundTransaction(fastify, reference, amountInZAR) {
+  const amountInKobo = Math.round(amountInZAR * 100);
+
+  try {
+    const response = await fetch(`${PAYSTACK_API_URL}/refund`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ transaction: reference, amount: amountInKobo, currency: 'ZAR' }),
+    });
+
+    const data = await response.json();
+
+    if (!response.ok || !data.status) {
+      return { success: false, error: data.message || 'Refund failed' };
+    }
+
+    await fastify.db.query(
+      `UPDATE payments SET status = 'refunded', refunded_at = NOW() WHERE reference = $1`,
+      [reference]
+    );
+
+    return { success: true, refund: data.data };
+  } catch (err) {
+    fastify.log.error({ err }, 'Paystack refund error');
+    return { success: false, error: 'Refund service unavailable' };
+  }
 }
 
 // ─── Currency Helpers ────────────────────────────────────────────────────────
@@ -340,8 +386,6 @@ export async function initializePaymentByCurrency(fastify, { userId, planId, cur
     const amount = getAmountForPlan(planId, upperCurrency);
     if (regional.provider === 'paystack') {
       return initializePaystackPayment(fastify, { userId, amount, currency: upperCurrency, email, plan: planId, callbackUrl });
-    } else if (regional.provider === 'konnect') {
-      return konnect.initializePayment(fastify, { userId, amount, currency: upperCurrency, email, plan: planId, callbackUrl });
     } else {
       // Use Stripe for other regional currencies
       return createCheckoutSession(fastify, {
@@ -384,10 +428,6 @@ function getAmountForPlan(planId, currency) {
   if (planId === 'tournament_entry') return regional?.prestige?.tournament_entry?.price || 5.00;
   if (planId === 'badge_unlock') return regional?.prestige?.badge_unlock?.price || 25.00;
   if (planId === 'lagos_pro_starter') return regional?.prestige?.lagos_pro_starter?.price || 5.00;
-  if (planId === 'royal_vanguard') return regional?.prestige?.royal_vanguard?.price || 15.00;
-  if (planId === 'red_devils_elite') return regional?.prestige?.red_devils_elite?.price || 15.00;
-  if (planId === 'blood_and_gold') return regional?.prestige?.blood_and_gold?.price || 10.00;
-  if (planId === 'red_and_white') return regional?.prestige?.red_and_white?.price || 10.00;
 
   // Gem packs (Legacy ZAR logic)
   if (upperCurrency === 'ZAR') {
@@ -398,8 +438,25 @@ function getAmountForPlan(planId, currency) {
   return 0;
 }
 
+export async function logWebhookAttempt(fastify, { provider, eventType, payload, status, errorMessage }) {
+  try {
+    fastify.log.info({ provider, eventType, status, errorMessage }, 'Webhook attempt logged');
+    
+    await fastify.db.query(
+      `INSERT INTO payment_webhook_logs (provider, event_type, payload, status, error_message)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [provider, eventType, JSON.stringify(payload), status, errorMessage]
+    ).catch(err => {
+      if (err.code !== '42P01') {
+        fastify.log.error('Failed to persist webhook log to DB: ' + err.message);
+      }
+    });
+  } catch (err) {
+    fastify.log.error('logWebhookAttempt unexpected error: ' + err.message);
+  }
+}
+
 export default {
-  logWebhookAttempt,
   verifyPaystackWebhookSignature,
   initializePayment,
   initializePaystackPayment,
@@ -407,9 +464,9 @@ export default {
   handleSuccessfulPayment,
   refundTransaction,
   initializePaymentByCurrency,
+  logWebhookAttempt,
   ZAR,
   EUROPE_PRICING,
   REGIONAL_CONFIG,
   GOAL_TOKEN_PACKS,
-  PAYSTACK_PUBLIC_KEY,
 };
