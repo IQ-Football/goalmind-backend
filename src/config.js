@@ -1,3 +1,5 @@
+import 'dotenv/config';
+
 const config = {
   app: {
     port: parseInt(process.env.PORT || '8080'),
@@ -9,12 +11,20 @@ const config = {
       'http://localhost:3000', // Local development
     ]
   },
-  database: {
+  database: process.env.DATABASE_URL ? {
+    host: new URL(process.env.DATABASE_URL).hostname,
+    port: parseInt(new URL(process.env.DATABASE_URL).port || '5432'),
+    name: new URL(process.env.DATABASE_URL).pathname.split('/')[1],
+    user: new URL(process.env.DATABASE_URL).username,
+    password: decodeURIComponent(new URL(process.env.DATABASE_URL).password),
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
+  } : {
     host: process.env.DB_HOST || 'localhost',
     port: parseInt(process.env.DB_PORT || '5432'),
     name: process.env.DB_NAME || 'goalmind',
     user: process.env.DB_USER || 'postgres',
     password: process.env.DB_PASSWORD || 'postgres',
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
   },
   redis: {
     host: process.env.REDIS_HOST || 'localhost',
