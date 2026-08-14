@@ -14,6 +14,7 @@ async function dbPlugin(fastify, options) {
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000, // Increased from 2000ms for stability
+    ssl: config.database.ssl,
   });
 
   // Test connection
