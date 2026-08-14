@@ -5,15 +5,21 @@ import config from '../config.js';
 const { Pool } = pg;
 
 async function dbPlugin(fastify, options) {
+  const poolConfig = config.database.url
+    ? { connectionString: config.database.url }
+    : {
+        host: config.database.host,
+        port: config.database.port,
+        database: config.database.name,
+        user: config.database.user,
+        password: config.database.password,
+      };
   const pool = new Pool({
-    host: config.database.host,
-    port: config.database.port,
-    database: config.database.name,
-    user: config.database.user,
-    password: config.database.password,
+    ...poolConfig,
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 10000, // Increased from 2000ms for stability
+    ssl: config.database.ssl,
   });
 
   // Test connection
