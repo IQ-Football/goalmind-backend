@@ -33,6 +33,7 @@ import shopRoutes from './routes/shop.js';
 import continentalCupRoutes from './routes/continentalCup.js';
 import onboardingRoutes from './routes/onboarding.js';
 import imperialConflictRoutes from './routes/imperialConflict.js';
+import adminGhostRoutes from './routes/adminGhosts.js';
 import { setupBattleHandlers } from './services/battleService.js';
 import { setupRelayHandlers } from './services/relayService.js';
 import { setupTournamentHandlers } from './services/tournamentLeaderboardService.js';
@@ -121,6 +122,7 @@ await fastify.register(shopRoutes, { prefix: '/payments' });
 await fastify.register(continentalCupRoutes, { prefix: '/continental-cup' });
 await fastify.register(onboardingRoutes, { prefix: '/onboarding' });
 await fastify.register(imperialConflictRoutes, { prefix: '/imperial-conflict' });
+await fastify.register(adminGhostRoutes, { prefix: '/admin' });
 
 // Socket.IO setup for real-time battles
 const io = new Server(fastify.server, {
