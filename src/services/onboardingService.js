@@ -9,13 +9,13 @@ import { v4 as uuidv4 } from 'uuid';
 const GEO_IP_MAPPING = {
   'Cairo': { tribe: 'al-ahly', backup: 'zamalek', country: 'Egypt' },
   'Johannesburg': { tribe: 'kaizer-chiefs', backup: 'orlando-pirates', country: 'South Africa' },
-  'Lagos': { tribe: 'enyimba-fc', backup: 'nigeria', country: 'Nigeria' },
+  'Lagos': { tribe: 'enyimba', backup: 'nigeria', country: 'Nigeria' },
   'Casablanca': { tribe: 'raja-casablanca', backup: 'wydad-casablanca', country: 'Morocco' },
   'Dar es Salaam': { tribe: 'simba-sc', backup: 'yanga-sc', country: 'Tanzania' },
   // Countries
   'Egypt': { tribe: 'al-ahly', backup: 'zamalek' },
   'South Africa': { tribe: 'kaizer-chiefs', backup: 'orlando-pirates' },
-  'Nigeria': { tribe: 'enyimba-fc', backup: 'nigeria' },
+  'Nigeria': { tribe: 'enyimba', backup: 'nigeria' },
   'Morocco': { tribe: 'raja-casablanca', backup: 'wydad-casablanca' },
   'Tanzania': { tribe: 'simba-sc', backup: 'yanga-sc' },
   'Ghana': { tribe: 'asante-kotoko', backup: 'ghana' },
