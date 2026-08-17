@@ -119,8 +119,8 @@ export async function awardFoundingGeneral(fastify, userId, force = false, manua
     // --- Imperial Status Lock (Phase 4.2) ---
     // Only the 'Imperial Ten' tribes can award Founding General status during the surge.
     const imperialTenSlugs = [
-      'al-ahly', 'wydad-casablanca', 'raja-casablanca', 'yanga-sc', 'enyimba-fc',
-      'orlando-pirates', 'simba-sc', 'mamelodi-sundowns', 'kaizer-chiefs', 'zamalek-sc'
+      'al-ahly', 'wydad-casablanca', 'raja-casablanca', 'yanga-sc', 'enyimba',
+      'orlando-pirates', 'simba-sc', 'mamelodi-sundowns', 'kaizer-chiefs', 'zamalek'
     ];
     const tribeSlugRes = await client.query('SELECT slug FROM tribes WHERE id = $1', [tribeId]);
     const tribeSlug = tribeSlugRes.rows[0]?.slug;
