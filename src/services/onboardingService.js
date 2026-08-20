@@ -20,8 +20,8 @@ const GEO_IP_MAPPING = {
   'Tanzania': { tribe: 'simba-sc', backup: 'yanga-sc' },
   'Ghana': { tribe: 'asante-kotoko', backup: 'ghana' },
   'Tunisia': { tribe: 'esperance-de-tunis', backup: 'tunisia' },
-  'Libya': { tribe: 'al-ahli-tripoli', backup: 'libya' },
-  'Zambia': { tribe: 'nkana-fc', backup: 'zambia' },
+  'Libya': { tribe: 'al-ahly', backup: 'zamalek' },
+  'Zambia': { tribe: 'tp-mazembe', backup: 'orlando-pirates' },
 };
 
 /**
