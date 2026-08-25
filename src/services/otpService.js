@@ -23,10 +23,18 @@ const otpService = {
       [phoneNumber, code, expiresAt]
     );
 
-    // Send via SMS (simulated)
-    await smsService.send(phoneNumber, `Your GoalMind verification code is: ${code}`);
+    // Send via SMS (real Twilio when configured, otherwise simulated)
+    const sendResult = await smsService.send(phoneNumber, `Your GoalMind verification code is: ${code}`);
 
-    return { success: true };
+    if (sendResult && sendResult.success === false) {
+      // Real SMS send failed — propagate so the caller can surface a clear error
+      return { success: false, simulated: false, error: (sendResult && sendResult.error) || 'SMS send failed' };
+    }
+
+    const simulated = smsService.isSimulationActive();
+    // Only ever return the code when the SMS was NOT actually delivered
+    // (simulation mode) so the on-screen dev/test fallback can display it.
+    return { success: true, simulated, ...(simulated ? { testCode: code } : {}) };
   },
 
   /**

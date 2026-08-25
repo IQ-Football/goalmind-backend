@@ -285,10 +285,23 @@ const authRoutes = async (fastify, options) => {
   }, async (request, reply) => {
     const { phoneNumber } = request.body;
     try {
-      await otpService.generateAndSendOTP(fastify, phoneNumber);
+      const otpResult = await otpService.generateAndSendOTP(fastify, phoneNumber);
+      if (otpResult.success === false) {
+        fastify.log.warn({ phoneNumber, err: otpResult.error }, 'OTP SMS send failed');
+        return reply.status(500).send({
+          success: false,
+          error: {
+            code: 'SMS_SEND_FAILED',
+            message: 'Could not deliver the verification code. Try again shortly.',
+            requestId: request.id,
+          },
+        });
+      }
       return reply.send({
         success: true,
-        message: 'OTP sent successfully',
+        message: otpResult.simulated ? 'OTP sent successfully (simulation mode)' : 'OTP sent successfully',
+        // On-screen dev/test fallback ONLY when SMS was simulated (no real send).
+        ...(otpResult.simulated && otpResult.testCode ? { simulationCode: otpResult.testCode } : {}),
       });
     } catch (err) {
       fastify.log.error(err);
